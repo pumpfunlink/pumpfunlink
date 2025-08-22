@@ -8,9 +8,9 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from selenium import webdriver
 from selenium.webdriver.common.by import By
-from selenium.webdriver.firefox.options import Options
-from selenium.webdriver.firefox.service import Service
-from webdriver_manager.firefox import GeckoDriverManager
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
 import threading
 import json
 import socketserver
@@ -35,29 +35,39 @@ class TelegramBot:
         self.driver = None
 
     def setup_driver(self):
-        """إعداد متصفح Firefox"""
+        """إعداد متصفح Chrome"""
         if not self.driver:
-            firefox_options = Options()
-            firefox_options.add_argument('--headless')
-            firefox_options.add_argument('--no-sandbox')
-            firefox_options.add_argument('--disable-dev-shm-usage')
-            firefox_options.add_argument('--disable-gpu')
-            firefox_options.add_argument('--window-size=375,667')
-            firefox_options.add_argument('--disable-images')  # تعطيل تحميل الصور لتسريع التحميل
-            firefox_options.add_argument('--disable-javascript')  # تعطيل JavaScript غير الضروري
-            firefox_options.set_preference("general.useragent.override", 
-                "Mozilla/5.0 (iPhone; CPU iPhone OS 14_7_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.2 Mobile/15E148 Safari/604.1")
-            firefox_options.set_preference("dom.webdriver.enabled", False)
-            firefox_options.set_preference("useAutomationExtension", False)
-            firefox_options.set_preference("media.volume_scale", "0.0")
-            firefox_options.set_preference("permissions.default.image", 2)  # حظر الصور
-            firefox_options.set_preference("dom.ipc.plugins.enabled.libflashplayer.so", False)  # تعطيل Flash
-            firefox_options.set_preference("media.autoplay.default", 0)  # منع التشغيل التلقائي
+            chrome_options = Options()
+            chrome_options.add_argument('--headless')
+            chrome_options.add_argument('--no-sandbox')
+            chrome_options.add_argument('--disable-dev-shm-usage')
+            chrome_options.add_argument('--disable-gpu')
+            chrome_options.add_argument('--window-size=375,667')
+            chrome_options.add_argument('--disable-images')  # تعطيل تحميل الصور لتسريع التحميل
+            chrome_options.add_argument('--disable-javascript')  # تعطيل JavaScript غير الضروري
+            chrome_options.add_argument('--disable-extensions')
+            chrome_options.add_argument('--disable-plugins')
+            chrome_options.add_argument('--disable-web-security')
+            chrome_options.add_argument('--disable-features=VizDisplayCompositor')
+            chrome_options.add_argument('--user-agent=Mozilla/5.0 (iPhone; CPU iPhone OS 14_7_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.2 Mobile/15E148 Safari/604.1')
+            
+            # إعدادات إضافية لتحسين الأداء
+            prefs = {
+                "profile.default_content_setting_values": {
+                    "images": 2,
+                    "plugins": 2,
+                    "popups": 2,
+                    "geolocation": 2,
+                    "notifications": 2,
+                    "media_stream": 2,
+                }
+            }
+            chrome_options.add_experimental_option("prefs", prefs)
 
-            service = Service(GeckoDriverManager().install())
-            self.driver = webdriver.Firefox(service=service, options=firefox_options)
+            service = Service(ChromeDriverManager().install())
+            self.driver = webdriver.Chrome(service=service, options=chrome_options)
             self.driver.set_page_load_timeout(10)  # تحديد وقت انتظار أقصى لتحميل الصفحة
-            logger.info("✅ Firefox browser setup successfully")
+            logger.info("✅ Chrome browser setup successfully")
 
     async def take_screenshot(self, url):
         """أخذ لقطة شاشة من الموقع"""
