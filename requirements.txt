@@ -1,0 +1,7 @@
+
+beautifulsoup4>=4.13.4
+pillow>=11.3.0
+python-telegram-bot[all]>=22.3
+requests>=2.32.5
+selenium>=4.35.0
+webdriver-manager>=4.0.2
