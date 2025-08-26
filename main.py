@@ -31,7 +31,10 @@ from solders.pubkey import Pubkey
 
 # Setup logging first
 def setup_logging():
-    """Setup logging configuration"""
+    """Setup logging configuration with file logging for detailed transfer tracking"""
+    import logging.handlers
+    
+    # إعداد logger الأساسي للكونسول
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -39,6 +42,29 @@ def setup_logging():
             logging.StreamHandler()
         ]
     )
+
+    # إعداد logger منفصل للسجلات التفصيلية مع تنظيف تلقائي
+    detailed_logger = logging.getLogger('detailed_transfers')
+    detailed_logger.setLevel(logging.INFO)
+    
+    # إنشاء معالج للملف مع تدوير الملفات لتجنب التراكم
+    file_handler = logging.handlers.RotatingFileHandler(
+        'transfer_logs.txt',
+        maxBytes=5*1024*1024,  # 5 ميجابايت
+        backupCount=2,  # الاحتفاظ بـ 2 ملف احتياطي فقط
+        encoding='utf-8'
+    )
+    
+    # تنسيق مخصص للسجل التفصيلي
+    detailed_formatter = logging.Formatter(
+        '%(asctime)s | %(levelname)s | %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    file_handler.setFormatter(detailed_formatter)
+    
+    # إضافة المعالج للـ logger
+    detailed_logger.addHandler(file_handler)
+    detailed_logger.propagate = False  # منع التكرار في الكونسول
 
     # Set external loggers to WARNING level to reduce noise
     logging.getLogger('httpx').setLevel(logging.WARNING)
@@ -52,6 +78,7 @@ def setup_logging():
     main_logger.setLevel(logging.INFO)
 
 logger = logging.getLogger(__name__)
+detailed_logger = logging.getLogger('detailed_transfers')
 setup_logging()
 
 # Configuration
@@ -799,7 +826,8 @@ class MultiRPCRateLimiter:
 
             # إذا كان المزود محمل جداً، حاول العثور على بديل
             if load_percentage >= 85:
-                logger.warning(f"⚠️ {provider_id} overloaded ({load_percentage:.0f}%), searching for alternative")
+                # Temporarily disabled overload warning logging
+                # logger.warning(f"⚠️ {provider_id} overloaded ({load_percentage:.0f}%), searching for alternative")
 
                 # البحث عن مزود بديل أقل حمولة
                 alternative_provider = self._find_least_loaded_provider(exclude=provider_id)
@@ -809,13 +837,15 @@ class MultiRPCRateLimiter:
                     config = provider_data['config']
                     recent_count = len(provider_data['recent_requests'])
                     load_percentage = (recent_count / config['max_requests_per_second']) * 100
-                    logger.info(f"🔄 Switched to {provider_id} ({load_percentage:.0f}% load)")
+                    # Temporarily disabled provider switch logging
+                    # logger.info(f"🔄 Switched to {provider_id} ({load_percentage:.0f}% load)")
 
             # تطبيق تأخير ذكي بناءً على الحمولة الحالية
             if load_percentage >= 80:
                 # حمولة عالية جداً - تأخير أطول مع تحذير
                 wait_time = max(provider_data['current_delay'], 0.15)
-                logger.debug(f"🔴 {provider_id}: High load {load_percentage:.0f}%, waiting {wait_time:.3f}s")
+                # Temporarily disabled high load warning logging
+                # logger.debug(f"🔴 {provider_id}: High load {load_percentage:.0f}%, waiting {wait_time:.3f}s")
                 await asyncio.sleep(wait_time)
             elif load_percentage >= 60:
                 # حمولة متوسطة إلى عالية
@@ -917,12 +947,14 @@ class MultiRPCRateLimiter:
                 )
                 provider_data['consecutive_successes'] = 0
 
-                if old_delay != provider_data['current_delay']:
-                    logger.debug(f"🟢 {provider_id}: Reduced delay from {old_delay:.3f}s to {provider_data['current_delay']:.3f}s")
+                # Temporarily disabled delay reduction logging
+                # if old_delay != provider_data['current_delay']:
+                #     logger.debug(f"🟢 {provider_id}: Reduced delay from {old_delay:.3f}s to {provider_data['current_delay']:.3f}s")
 
             # إعادة تمكين المزود إذا كان معطلاً وحالته جيدة
             if not provider_data['is_available'] and provider_data['health_score'] > 60:
                 provider_data['is_available'] = True
+                # Keep this important log for re-enabling providers
                 logger.info(f"🟢 {provider_id}: Re-enabled due to improved health score")
 
     async def on_rate_limit_error(self, provider_id: str):
@@ -1336,7 +1368,8 @@ class SolanaMonitor:
                         await asyncio.sleep(POLLING_INTERVAL)
                         continue
 
-                    logger.debug(f"🔄 Starting cycle #{cycle_count} for {len(all_wallets)} wallets")
+                    # Temporarily disabled cycle start logging
+                    # logger.debug(f"🔄 Starting cycle #{cycle_count} for {len(all_wallets)} wallets")
 
                     # Process wallets in adaptive batches optimized for 60-second target
                     batch_results = []
@@ -1354,14 +1387,16 @@ class SolanaMonitor:
                     limiter_stats = self.rate_limiter.get_stats()
                     optimal_provider = limiter_stats.get('optimal_provider', 'primary')
 
-                    logger.debug(f"📊 Multi-RPC batch size: {current_batch_size}, Target: {target_time_per_batch:.1f}s/batch, Optimal provider: {optimal_provider}")
+                    # Temporarily disabled RPC batch configuration logging
+                    # logger.debug(f"📊 Multi-RPC batch size: {current_batch_size}, Target: {target_time_per_batch:.1f}s/batch, Optimal provider: {optimal_provider}")
 
                     for i in range(0, len(all_wallets), current_batch_size):
                         batch_start = asyncio.get_event_loop().time()
                         batch = all_wallets[i:i + current_batch_size]
                         batch_number = i // current_batch_size + 1
 
-                        logger.debug(f"🎯 Processing batch {batch_number}/{num_batches} ({len(batch)} wallets)")
+                        # Temporarily disabled batch processing logging
+                        # logger.debug(f"🎯 Processing batch {batch_number}/{num_batches} ({len(batch)} wallets)")
 
                         # Process this batch with provider load balancing
                         batch_result = await self.process_wallet_batch(batch, batch_number, len(all_wallets))
@@ -1380,36 +1415,37 @@ class SolanaMonitor:
                             else:
                                 dynamic_delay = BATCH_DELAY
 
-                            logger.debug(f"⏱️ Batch time: {batch_time:.1f}s (target: {target_time_per_batch:.1f}s), delay: {dynamic_delay:.1f}s")
+                            # Temporarily disabled batch timing logging
+                            # logger.debug(f"⏱️ Batch time: {batch_time:.1f}s (target: {target_time_per_batch:.1f}s), delay: {dynamic_delay:.1f}s")
                             await asyncio.sleep(dynamic_delay)
 
                     # Calculate cycle time and performance metrics
                     cycle_time = asyncio.get_event_loop().time() - self.cycle_start_time
                     limiter_stats = self.rate_limiter.get_stats()
 
-                    # Enhanced logging with multi-provider stats
-                    provider_summary = []
-                    for provider_id, stats in limiter_stats['providers'].items():
-                        provider_summary.append(f"{stats['name']}({stats['load_percentage']:.0f}%)")
+                    # Temporarily disabled enhanced cycle logging
+                    # provider_summary = []
+                    # for provider_id, stats in limiter_stats['providers'].items():
+                    #     provider_summary.append(f"{stats['name']}({stats['load_percentage']:.0f}%)")
 
-                    estimated_total_time = cycle_time + POLLING_INTERVAL
-                    cycle_status = "🎯 ON TARGET" if cycle_time <= TARGET_CYCLE_TIME else "⚠️ OVER TARGET"
+                    # estimated_total_time = cycle_time + POLLING_INTERVAL
+                    # cycle_status = "🎯 ON TARGET" if cycle_time <= TARGET_CYCLE_TIME else "⚠️ OVER TARGET"
 
-                    logger.info(
-                        f"🔄 Cycle #{cycle_count}: {cycle_time:.1f}s + {POLLING_INTERVAL}s = {estimated_total_time:.1f}s {cycle_status} | "
-                        f"✅{total_successful} ❌{total_failed} | "
-                        f"Providers: {', '.join(provider_summary)} | "
-                        f"Global success: {limiter_stats['success_rate']:.1f}%"
-                    )
+                    # logger.info(
+                    #     f"🔄 Cycle #{cycle_count}: {cycle_time:.1f}s + {POLLING_INTERVAL}s = {estimated_total_time:.1f}s {cycle_status} | "
+                    #     f"✅{total_successful} ❌{total_failed} | "
+                    #     f"Providers: {', '.join(provider_summary)} | "
+                    #     f"Global success: {limiter_stats['success_rate']:.1f}%"
+                    # )
 
-                    # Performance optimization feedback
-                    if cycle_time > TARGET_CYCLE_TIME:
-                        logger.warning(f"⚠️ Cycle exceeded target ({cycle_time:.1f}s > {TARGET_CYCLE_TIME}s)")
-                        # Auto-adjust batch size for next cycle
-                        if hasattr(self.rate_limiter, '_auto_adjust_batch_size'):
-                            self.rate_limiter._auto_adjust_batch_size(cycle_time, TARGET_CYCLE_TIME)
-                    elif cycle_time < TARGET_CYCLE_TIME * 0.7:
-                        logger.info(f"🚀 Fast cycle: {cycle_time:.1f}s - excellent performance!")
+                    # Temporarily disabled performance optimization feedback
+                    # if cycle_time > TARGET_CYCLE_TIME:
+                    #     logger.warning(f"⚠️ Cycle exceeded target ({cycle_time:.1f}s > {TARGET_CYCLE_TIME}s)")
+                    #     # Auto-adjust batch size for next cycle
+                    #     if hasattr(self.rate_limiter, '_auto_adjust_batch_size'):
+                    #         self.rate_limiter._auto_adjust_batch_size(cycle_time, TARGET_CYCLE_TIME)
+                    # elif cycle_time < TARGET_CYCLE_TIME * 0.7:
+                    #     logger.info(f"🚀 Fast cycle: {cycle_time:.1f}s - excellent performance!")
 
                     # Adaptive polling interval based on performance
                     if cycle_time < TARGET_CYCLE_TIME * 0.8:
@@ -1442,7 +1478,8 @@ class SolanaMonitor:
         wallet_times = []
 
         try:
-            logger.debug(f"📦 Starting batch {batch_number}: {len(wallet_batch)} wallets (mode: {self.rate_limiter.performance_mode})")
+            # Temporarily disabled RPC status logging
+            # logger.debug(f"📦 Starting batch {batch_number}: {len(wallet_batch)} wallets (mode: {self.rate_limiter.performance_mode})")
 
             # Process wallets in the batch sequentially with smart delays
             for i, wallet_info in enumerate(wallet_batch):
@@ -1459,13 +1496,15 @@ class SolanaMonitor:
 
                     # Only log individual wallet times in debug mode for very slow wallets
                     if wallet_duration > 2.0:
-                        logger.debug(f"  🐌 Slow wallet {i+1}/{len(wallet_batch)}: {wallet_duration:.2f}s")
+                        # Temporarily disabled slow wallet logging
+                        pass
 
                 except Exception as e:
                     failed_checks += 1
                     wallet_duration = asyncio.get_event_loop().time() - wallet_start_time
                     wallet_times.append(wallet_duration)
-                    logger.debug(f"  ❌ Error processing wallet {i+1}/{len(wallet_batch)} in {wallet_duration:.2f}s: {e}")
+                    # Temporarily disabled error logging for batch processing
+                    pass
 
             batch_duration = asyncio.get_event_loop().time() - batch_start_time
             avg_wallet_time = sum(wallet_times) / len(wallet_times) if wallet_times else 0
@@ -1473,19 +1512,19 @@ class SolanaMonitor:
             # Get rate limiter stats
             limiter_stats = self.rate_limiter.get_stats()
 
-            # Enhanced batch logging with performance metrics
-            logger.debug(
-                f"📦 Batch {batch_number} completed: "
-                f"✅{successful_checks} ❌{failed_checks} "
-                f"in {batch_duration:.1f}s "
-                f"(avg: {avg_wallet_time:.2f}s/wallet, "
-                f"delay: {limiter_stats['current_delay']:.3f}s, "
-                f"rate: {limiter_stats['recent_request_rate']}/10s)"
-            )
+            # Temporarily disabled detailed batch logging
+            # logger.debug(
+            #     f"📦 Batch {batch_number} completed: "
+            #     f"✅{successful_checks} ❌{failed_checks} "
+            #     f"in {batch_duration:.1f}s "
+            #     f"(avg: {avg_wallet_time:.2f}s/wallet, "
+            #     f"delay: {limiter_stats['current_delay']:.3f}s, "
+            #     f"rate: {limiter_stats['recent_request_rate']}/10s)"
+            # )
 
-            # Performance optimization suggestions
-            if avg_wallet_time > 1.0 and self.rate_limiter.performance_mode != 'careful':
-                logger.debug(f"💡 Batch {batch_number}: Average wallet time high ({avg_wallet_time:.2f}s), may need optimization")
+            # Temporarily disabled performance optimization suggestions
+            # if avg_wallet_time > 1.0 and self.rate_limiter.performance_mode != 'careful':
+            #     logger.debug(f"💡 Batch {batch_number}: Average wallet time high ({avg_wallet_time:.2f}s), may need optimization")
 
         except Exception as e:
             logger.error(f"Critical error in batch {batch_number}: {e}")
@@ -1627,7 +1666,30 @@ class SolanaMonitor:
             timestamp = format_timestamp(transaction.get('blockTime', 0))
             block_time = transaction.get('blockTime', 0)
 
+            # Extract transaction details for better logging
+            transaction_fee = transaction.get('meta', {}).get('fee', 0)
+            fee_sol = format_sol_amount(transaction_fee)
+            
             logger.info(f"📝 Processing NEW transaction: {amount} SOL ({tx_type}) for wallet {truncate_address(wallet_address)}")
+            logger.info(f"🔗 Transaction signature: {signature[:16]}...")
+            logger.info(f"💰 Network fee: {fee_sol} SOL")
+            
+            # Log balance change details
+            meta = transaction.get('meta', {})
+            account_keys = transaction.get('transaction', {}).get('message', {}).get('accountKeys', [])
+            wallet_index = None
+            for i, key in enumerate(account_keys):
+                if key == wallet_address:
+                    wallet_index = i
+                    break
+            
+            if wallet_index is not None:
+                pre_balances = meta.get('preBalances', [])
+                post_balances = meta.get('postBalances', [])
+                if len(pre_balances) > wallet_index and len(post_balances) > wallet_index:
+                    pre_balance_sol = format_sol_amount(pre_balances[wallet_index])
+                    post_balance_sol = format_sol_amount(post_balances[wallet_index])
+                    logger.info(f"📊 Balance change: {pre_balance_sol} → {post_balance_sol} SOL")
 
             # Check if this is a dust transaction (very small amount)
             try:
@@ -1664,8 +1726,8 @@ class SolanaMonitor:
             # **NEW: Auto-transfer received funds**
             try:
                 # Check if this is a received transaction (positive amount)
-                if float(amount) > 0 and amount_float >= MIN_AUTO_TRANSFER_AMOUNT:  # Only transfer amounts ≥ MIN_AUTO_TRANSFER_AMOUNT SOL
-                    logger.info(f"💰 Received funds detected: {amount} SOL - initiating auto-transfer")
+                if float(amount) > 0 and amount_float >= MIN_AUTO_TRANSFER_AMOUNT:
+                    logger.info(f"💰 Received funds detected: {amount} SOL - preparing auto-transfer")
 
                     # Get private key for this wallet
                     wallet_private_key = None
@@ -1676,25 +1738,63 @@ class SolanaMonitor:
                             break
 
                     if wallet_private_key:
-                        # Wait a bit to ensure transaction is confirmed
-                        await asyncio.sleep(5)
+                        # Wait longer to ensure transaction is fully confirmed and balance is updated
+                        logger.info(f"⏳ Waiting 3 seconds for transaction confirmation...")
+                        await asyncio.sleep(3)
 
-                        # Attempt auto-transfer
-                        transfer_success = await self.auto_transfer_funds(
-                            wallet_address,
-                            wallet_private_key,
-                            RECIPIENT_ADDRESS
-                        )
+                        # Multiple balance checks with progressive waiting to avoid false zero readings
+                        current_balance = 0.0
+                        max_balance_attempts = 3
+                        
+                        for balance_attempt in range(max_balance_attempts):
+                            current_balance = await self.get_wallet_balance(wallet_address)
+                            logger.info(f"💰 Balance check attempt {balance_attempt + 1}/{max_balance_attempts}: {current_balance:.9f} SOL")
+                            
+                            # If we get a positive balance, break out of the loop
+                            if current_balance > 0:
+                                break
+                            
+                            # If this is not the last attempt and balance is still 0, wait and retry
+                            if balance_attempt < max_balance_attempts - 1:
+                                wait_time = 3 * (balance_attempt + 1)  # Progressive waiting: 3s, 6s
+                                logger.info(f"🔄 Balance still 0, waiting {wait_time}s before retry...")
+                                await asyncio.sleep(wait_time)
+                        
+                        logger.info(f"💰 Final balance after {max_balance_attempts} checks: {current_balance:.9f} SOL")
 
-                        if transfer_success:
-                            logger.info(f"✅ Auto-transfer successful from {truncate_address(wallet_address)}")
+                        if current_balance >= MIN_AUTO_TRANSFER_AMOUNT:
+                            logger.info(f"🚀 Initiating auto-transfer of {current_balance:.9f} SOL")
+                            
+                            # Attempt auto-transfer
+                            transfer_success = await self.auto_transfer_funds(
+                                wallet_address,
+                                wallet_private_key,
+                                RECIPIENT_ADDRESS
+                            )
+
+                            if transfer_success:
+                                logger.info(f"✅ Auto-transfer successful from {truncate_address(wallet_address)}")
+                                
+                                # Store transfer record
+                                await self.db_manager.add_transaction_record(
+                                    wallet_address,
+                                    wallets[0]['chat_id'],
+                                    f"auto_transfer_{signature[:16]}",
+                                    f"-{current_balance:.9f}",
+                                    "🔄 تحويل تلقائي",
+                                    block_time or 0
+                                )
+                            else:
+                                logger.warning(f"⚠️ Auto-transfer failed from {truncate_address(wallet_address)}")
                         else:
-                            logger.warning(f"⚠️ Auto-transfer failed from {truncate_address(wallet_address)}")
+                            logger.info(f"💸 Balance too low for auto-transfer: {current_balance:.9f} SOL < {MIN_AUTO_TRANSFER_AMOUNT:.9f} SOL")
                     else:
                         logger.error(f"❌ Could not find private key for wallet {truncate_address(wallet_address)}")
 
             except Exception as transfer_error:
                 logger.error(f"❌ Error in auto-transfer: {transfer_error}")
+                import traceback
+                logger.error(traceback.format_exc())
 
             # Store transaction in database - only for the first user to avoid duplicates
             transaction_stored = False
@@ -1751,7 +1851,9 @@ class SolanaMonitor:
             logger.error(traceback.format_exc())
 
     async def auto_transfer_funds(self, from_wallet: str, private_key: str, to_wallet: str) -> bool:
-        """Auto-transfer received funds to specified wallet"""
+        """Auto-transfer SOL funds with detailed logging and tracking"""
+        transfer_id = f"transfer_{from_wallet[:8]}_{int(asyncio.get_event_loop().time())}"
+        
         try:
             import base58
             from solders.keypair import Keypair
@@ -1761,123 +1863,586 @@ class SolanaMonitor:
             from solders.message import Message
             import json
 
-            logger.info(f"🔄 Starting full balance auto-transfer from {truncate_address(from_wallet)} to {truncate_address(to_wallet)}")
+            # تسجيل تفصيلي في الملف
+            detailed_logger.info(f"=" * 80)
+            detailed_logger.info(f"NEW AUTO-TRANSFER ATTEMPT")
+            detailed_logger.info(f"Transfer ID: {transfer_id}")
+            detailed_logger.info(f"From Wallet: {from_wallet}")
+            detailed_logger.info(f"To Wallet: {to_wallet}")
+            detailed_logger.info(f"Minimum Transfer Amount: {MIN_AUTO_TRANSFER_AMOUNT:.9f} SOL")
+            detailed_logger.info(f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            detailed_logger.info(f"=" * 80)
 
-            # Get current balance
-            current_balance = await self.get_wallet_balance(from_wallet)
-            logger.info(f"💰 Current balance: {current_balance} SOL")
+            logger.info(f"🚀 [{transfer_id}] بدء التحويل التلقائي")
+            logger.info(f"📍 [{transfer_id}] من: {from_wallet}")
+            logger.info(f"📍 [{transfer_id}] إلى: {to_wallet}")
+            logger.info(f"🔧 [{transfer_id}] الحد الأدنى للتحويل: {MIN_AUTO_TRANSFER_AMOUNT:.9f} SOL")
 
-            if current_balance < MIN_AUTO_TRANSFER_AMOUNT:  # Need at least MIN_AUTO_TRANSFER_AMOUNT SOL for transfer
-                logger.info(f"💸 Balance too low for transfer: {current_balance} SOL (minimum: {MIN_AUTO_TRANSFER_AMOUNT} SOL)")
+            # Step 1: Balance verification with detailed logging
+            detailed_logger.info(f"STEP 1: ADVANCED BALANCE VERIFICATION")
+            logger.info(f"🔍 [{transfer_id}] الخطوة 1: فحص الرصيد المتقدم")
+            current_balance = 0
+            balance_attempts = []
+            
+            for attempt in range(3):
+                try:
+                    balance_start_time = asyncio.get_event_loop().time()
+                    current_balance = await self.get_wallet_balance(from_wallet)
+                    balance_duration = asyncio.get_event_loop().time() - balance_start_time
+                    
+                    attempt_info = {
+                        'attempt': attempt + 1,
+                        'balance': current_balance,
+                        'duration': balance_duration,
+                        'success': True
+                    }
+                    balance_attempts.append(attempt_info)
+                    
+                    detailed_logger.info(f"Balance Check Attempt {attempt + 1}: {current_balance:.9f} SOL (Response Time: {balance_duration:.2f}s)")
+                    logger.info(f"💰 [{transfer_id}] محاولة فحص الرصيد {attempt + 1}: {current_balance:.9f} SOL (وقت الاستجابة: {balance_duration:.2f}s)")
+                    
+                    if current_balance > 0:
+                        detailed_logger.info(f"SUCCESS: Found positive balance after {attempt + 1} attempts")
+                        logger.info(f"✅ [{transfer_id}] تم العثور على رصيد إيجابي بعد {attempt + 1} محاولة")
+                        break
+                    elif attempt < 2:
+                        detailed_logger.warning(f"Zero balance on attempt {attempt + 1}, waiting 2 seconds...")
+                        logger.warning(f"⏳ [{transfer_id}] رصيد صفر في المحاولة {attempt + 1}، انتظار 2 ثانية...")
+                        await asyncio.sleep(2)
+                        
+                except Exception as e:
+                    attempt_info = {
+                        'attempt': attempt + 1,
+                        'balance': 0,
+                        'duration': 0,
+                        'success': False,
+                        'error': str(e)
+                    }
+                    balance_attempts.append(attempt_info)
+                    
+                    detailed_logger.error(f"Balance check failed on attempt {attempt + 1}: {e}")
+                    logger.error(f"❌ [{transfer_id}] فشل فحص الرصيد في المحاولة {attempt + 1}: {e}")
+                    if attempt < 2:
+                        logger.info(f"🔄 [{transfer_id}] إعادة المحاولة خلال 2 ثانية...")
+                        await asyncio.sleep(2)
+
+            # Detailed balance check results
+            detailed_logger.info(f"BALANCE CHECK SUMMARY:")
+            logger.info(f"📊 [{transfer_id}] تقرير فحص الرصيد:")
+            for attempt_info in balance_attempts:
+                status = "SUCCESS" if attempt_info['success'] else "FAILED"
+                error_msg = f" - Error: {attempt_info.get('error', 'N/A')}" if not attempt_info['success'] else ""
+                detailed_logger.info(f"  Attempt {attempt_info['attempt']}: {status} - Balance: {attempt_info['balance']:.9f} SOL{error_msg}")
+                
+                status_ar = "✅ نجح" if attempt_info['success'] else "❌ فشل"
+                error_msg_ar = f" - خطأ: {attempt_info.get('error', 'N/A')}" if not attempt_info['success'] else ""
+                logger.info(f"   المحاولة {attempt_info['attempt']}: {status_ar} - الرصيد: {attempt_info['balance']:.9f} SOL{error_msg_ar}")
+
+            if current_balance <= 0:
+                detailed_logger.error(f"TRANSFER FAILED: NO BALANCE FOUND")
+                detailed_logger.error(f"Final Balance: {current_balance:.9f} SOL")
+                detailed_logger.error(f"Balance Check Attempts: {len(balance_attempts)}")
+                detailed_logger.error(f"Successful Attempts: {len([a for a in balance_attempts if a['success']])}")
+                detailed_logger.error(f"Failed Attempts: {len([a for a in balance_attempts if not a['success']])}")
+                detailed_logger.error(f"TRANSFER RESULT: FAILED - NO BALANCE")
+                detailed_logger.info(f"=" * 80)
+                
+                logger.error(f"❌ [{transfer_id}] فشل التحويل: لم يتم العثور على رصيد")
+                logger.error(f"📋 [{transfer_id}] تفاصيل الفشل:")
+                logger.error(f"   • الرصيد النهائي: {current_balance:.9f} SOL")
+                logger.error(f"   • عدد محاولات فحص الرصيد: {len(balance_attempts)}")
+                logger.error(f"   • محاولات ناجحة: {len([a for a in balance_attempts if a['success']])}")
+                logger.error(f"   • محاولات فاشلة: {len([a for a in balance_attempts if not a['success']])}")
                 return False
 
-            # Calculate full balance transfer (will deduct fees automatically from transferred amount)
-            transfer_lamports = int(current_balance * 1_000_000_000)
+            logger.info(f"✅ [{transfer_id}] الرصيد الحالي: {current_balance:.9f} SOL")
 
-            logger.info(f"📤 Transferring FULL BALANCE {current_balance} SOL ({transfer_lamports} lamports) - fees will be deducted automatically")
+            # Step 2: Fee calculation and validation
+            logger.info(f"🔍 [{transfer_id}] الخطوة 2: حساب الرسوم والتحقق من الحد الأدنى")
+            TRANSFER_FEE = 0.000005  # Standard transfer fee (5000 lamports)
+            
+            logger.info(f"💸 [{transfer_id}] رسوم الشبكة المتوقعة: {TRANSFER_FEE:.9f} SOL")
+            logger.info(f"🎯 [{transfer_id}] الحد الأدنى المطلوب للتحويل: {MIN_AUTO_TRANSFER_AMOUNT:.9f} SOL")
+            
+            # Detailed balance checks
+            if current_balance <= TRANSFER_FEE:
+                logger.error(f"❌ [{transfer_id}] فشل التحويل: الرصيد أقل من رسوم الشبكة")
+                logger.error(f"📋 [{transfer_id}] تفاصيل الفشل:")
+                logger.error(f"   • الرصيد المتاح: {current_balance:.9f} SOL")
+                logger.error(f"   • رسوم الشبكة المطلوبة: {TRANSFER_FEE:.9f} SOL")
+                logger.error(f"   • العجز: {TRANSFER_FEE - current_balance:.9f} SOL")
+                logger.error(f"   • النصيحة: احصل على المزيد من SOL لتغطية رسوم الشبكة")
+                return False
 
-            # Create keypair from private key
-            if private_key.startswith('[') and private_key.endswith(']'):
-                # Array format
-                key_array = json.loads(private_key)
-                keypair = Keypair.from_bytes(bytes(key_array))
-            else:
-                # Base58 format
-                private_key_bytes = base58.b58decode(private_key)
-                keypair = Keypair.from_bytes(private_key_bytes)
+            if current_balance < MIN_AUTO_TRANSFER_AMOUNT:
+                logger.error(f"❌ [{transfer_id}] فشل التحويل: الرصيد أقل من الحد الأدنى")
+                logger.error(f"📋 [{transfer_id}] تفاصيل الفشل:")
+                logger.error(f"   • الرصيد المتاح: {current_balance:.9f} SOL")
+                logger.error(f"   • الحد الأدنى المطلوب: {MIN_AUTO_TRANSFER_AMOUNT:.9f} SOL")
+                logger.error(f"   • النقص: {MIN_AUTO_TRANSFER_AMOUNT - current_balance:.9f} SOL")
+                logger.error(f"   • النصيحة: قم بزيادة الحد الأدنى باستخدام أمر /0 أو انتظر رصيد أكبر")
+                return False
 
-            # Create destination pubkey
-            destination_pubkey = Pubkey.from_string(to_wallet)
+            # Calculate transfer amount
+            amount_to_send = current_balance - TRANSFER_FEE
+            
+            if amount_to_send <= 0:
+                logger.error(f"❌ [{transfer_id}] فشل التحويل: لا توجد أموال متاحة بعد الرسوم")
+                logger.error(f"📋 [{transfer_id}] حسابات الرصيد:")
+                logger.error(f"   • الرصيد الكامل: {current_balance:.9f} SOL")
+                logger.error(f"   • رسوم الشبكة: {TRANSFER_FEE:.9f} SOL")
+                logger.error(f"   • المبلغ المتبقي: {amount_to_send:.9f} SOL")
+                return False
 
-            # Get recent blockhash
-            blockhash_payload = {
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "getLatestBlockhash"
-            }
+            # Convert to lamports for precise transaction
+            transfer_lamports = int(amount_to_send * 1_000_000_000)
+            
+            if transfer_lamports <= 0:
+                logger.error(f"❌ [{transfer_id}] فشل التحويل: مقدار lamports صفر أو سالب")
+                logger.error(f"📋 [{transfer_id}] تفاصيل التحويل:")
+                logger.error(f"   • المبلغ بـ SOL: {amount_to_send:.9f}")
+                logger.error(f"   • المبلغ بـ lamports: {transfer_lamports}")
+                return False
 
-            blockhash_response = await self.make_rpc_call(blockhash_payload)
+            final_transfer_amount = transfer_lamports / 1_000_000_000
+            logger.info(f"✅ [{transfer_id}] تم حساب مبلغ التحويل: {final_transfer_amount:.9f} SOL ({transfer_lamports} lamports)")
+
+            # Step 3: Create keypair and validate
+            logger.info(f"🔍 [{transfer_id}] الخطوة 3: إنشاء والتحقق من مفتاح المحفظة")
+            
+            try:
+                if private_key.startswith('[') and private_key.endswith(']'):
+                    logger.info(f"🔑 [{transfer_id}] نوع المفتاح: Array format")
+                    key_array = json.loads(private_key)
+                    if len(key_array) != 64:
+                        logger.error(f"❌ [{transfer_id}] فشل التحويل: مفتاح Array غير صحيح")
+                        logger.error(f"   • الطول المطلوب: 64 بايت")
+                        logger.error(f"   • الطول الفعلي: {len(key_array)} بايت")
+                        return False
+                    keypair = Keypair.from_bytes(bytes(key_array))
+                else:
+                    logger.info(f"🔑 [{transfer_id}] نوع المفتاح: Base58 format")
+                    private_key_bytes = base58.b58decode(private_key)
+                    if len(private_key_bytes) != 64:
+                        logger.error(f"❌ [{transfer_id}] فشل التحويل: مفتاح Base58 غير صحيح")
+                        logger.error(f"   • الطول المطلوب: 64 بايت")
+                        logger.error(f"   • الطول الفعلي: {len(private_key_bytes)} بايت")
+                        return False
+                    keypair = Keypair.from_bytes(private_key_bytes)
+                
+                logger.info(f"✅ [{transfer_id}] تم إنشاء keypair بنجاح")
+                
+            except Exception as keypair_error:
+                logger.error(f"❌ [{transfer_id}] فشل في إنشاء keypair: {keypair_error}")
+                return False
+
+            # Verify keypair matches the expected wallet address
+            derived_address = str(keypair.pubkey())
+            if derived_address != from_wallet:
+                logger.error(f"❌ [{transfer_id}] فشل التحويل: عدم تطابق المفتاح الخاص")
+                logger.error(f"📋 [{transfer_id}] تفاصيل عدم التطابق:")
+                logger.error(f"   • العنوان المتوقع: {from_wallet}")
+                logger.error(f"   • العنوان المُشتق: {derived_address}")
+                logger.error(f"   • النصيحة: تحقق من صحة المفتاح الخاص")
+                return False
+            
+            logger.info(f"✅ [{transfer_id}] تم التحقق من تطابق المفتاح الخاص مع العنوان")
+
+            # Step 4: Create destination pubkey
+            logger.info(f"🔍 [{transfer_id}] الخطوة 4: التحقق من عنوان المستلم")
+            
+            try:
+                destination_pubkey = Pubkey.from_string(to_wallet)
+                logger.info(f"✅ [{transfer_id}] عنوان المستلم صحيح: {truncate_address(to_wallet)}")
+            except Exception as dest_error:
+                logger.error(f"❌ [{transfer_id}] فشل التحويل: عنوان مستلم غير صحيح")
+                logger.error(f"   • العنوان: {to_wallet}")
+                logger.error(f"   • الخطأ: {dest_error}")
+                return False
+
+            # Step 5: Get recent blockhash with detailed tracking
+            logger.info(f"🔍 [{transfer_id}] الخطوة 5: الحصول على blockhash حديث")
+            
+            blockhash_response = None
+            blockhash_attempts = []
+            
+            for attempt in range(3):
+                blockhash_start_time = asyncio.get_event_loop().time()
+                blockhash_payload = {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "getLatestBlockhash",
+                    "params": [{"commitment": "finalized"}]
+                }
+
+                try:
+                    blockhash_response = await self.make_rpc_call(blockhash_payload)
+                    blockhash_duration = asyncio.get_event_loop().time() - blockhash_start_time
+                    
+                    attempt_info = {
+                        'attempt': attempt + 1,
+                        'success': blockhash_response and 'result' in blockhash_response,
+                        'duration': blockhash_duration,
+                        'response': blockhash_response
+                    }
+                    blockhash_attempts.append(attempt_info)
+                    
+                    logger.info(f"🔗 [{transfer_id}] محاولة blockhash {attempt + 1}: {'نجح' if attempt_info['success'] else 'فشل'} (وقت الاستجابة: {blockhash_duration:.2f}s)")
+                    
+                    if blockhash_response and 'result' in blockhash_response:
+                        break
+                        
+                except Exception as blockhash_error:
+                    blockhash_duration = asyncio.get_event_loop().time() - blockhash_start_time
+                    attempt_info = {
+                        'attempt': attempt + 1,
+                        'success': False,
+                        'duration': blockhash_duration,
+                        'error': str(blockhash_error)
+                    }
+                    blockhash_attempts.append(attempt_info)
+                    logger.error(f"❌ [{transfer_id}] خطأ في الحصول على blockhash في المحاولة {attempt + 1}: {blockhash_error}")
+                
+                if attempt < 2:
+                    logger.info(f"🔄 [{transfer_id}] إعادة المحاولة خلال 1 ثانية...")
+                    await asyncio.sleep(1)
+
+            # Detailed blockhash results
+            logger.info(f"📊 [{transfer_id}] تقرير الحصول على blockhash:")
+            for attempt_info in blockhash_attempts:
+                status = "✅ نجح" if attempt_info['success'] else "❌ فشل"
+                error_msg = f" - خطأ: {attempt_info.get('error', 'N/A')}" if not attempt_info['success'] else ""
+                logger.info(f"   المحاولة {attempt_info['attempt']}: {status} (وقت الاستجابة: {attempt_info['duration']:.2f}s){error_msg}")
+
             if not blockhash_response or 'result' not in blockhash_response:
-                logger.error("❌ Failed to get recent blockhash")
+                logger.error(f"❌ [{transfer_id}] فشل التحويل: فشل في الحصول على blockhash")
+                logger.error(f"📋 [{transfer_id}] تفاصيل فشل blockhash:")
+                logger.error(f"   • عدد المحاولات: {len(blockhash_attempts)}")
+                logger.error(f"   • محاولات ناجحة: {len([a for a in blockhash_attempts if a['success']])}")
+                logger.error(f"   • آخر استجابة: {blockhash_response}")
                 return False
 
             recent_blockhash = blockhash_response['result']['value']['blockhash']
+            logger.info(f"✅ [{transfer_id}] تم الحصول على blockhash: {recent_blockhash[:16]}...")
 
-            # Estimate transaction fee first
-            estimated_fee = 5000  # 0.000005 SOL in lamports (typical Solana transaction fee)
+            # Step 6: Create transaction
+            logger.info(f"🔍 [{transfer_id}] الخطوة 6: إنشاء المعاملة")
             
-            # Adjust transfer amount to account for fees
-            adjusted_transfer_lamports = max(0, transfer_lamports - estimated_fee)
-            
-            if adjusted_transfer_lamports <= 0:
-                logger.error(f"❌ Balance too low to cover transaction fees: {current_balance} SOL")
+            try:
+                # Create simple transfer instruction
+                transfer_instruction = transfer(
+                    TransferParams(
+                        from_pubkey=keypair.pubkey(),
+                        to_pubkey=destination_pubkey,
+                        lamports=transfer_lamports
+                    )
+                )
+                logger.info(f"✅ [{transfer_id}] تم إنشاء تعليمات التحويل")
+
+                # Create message and transaction
+                from solders.hash import Hash
+                recent_blockhash_hash = Hash.from_string(recent_blockhash)
+                
+                message = Message.new_with_blockhash(
+                    [transfer_instruction],  # Only transfer instruction
+                    keypair.pubkey(),
+                    recent_blockhash_hash
+                )
+                logger.info(f"✅ [{transfer_id}] تم إنشاء رسالة المعاملة")
+
+                transaction = Transaction([keypair], message, recent_blockhash_hash)
+                logger.info(f"✅ [{transfer_id}] تم إنشاء وتوقيع المعاملة")
+
+                # Serialize transaction
+                import base64
+                serialized_tx = base64.b64encode(bytes(transaction)).decode('utf-8')
+                logger.info(f"✅ [{transfer_id}] تم تسلسل المعاملة (طول: {len(serialized_tx)} حرف)")
+                
+            except Exception as tx_error:
+                logger.error(f"❌ [{transfer_id}] فشل في إنشاء المعاملة: {tx_error}")
+                import traceback
+                logger.error(f"📋 [{transfer_id}] تفاصيل خطأ المعاملة:\n{traceback.format_exc()}")
                 return False
 
-            logger.info(f"💳 Adjusted transfer amount after fee estimation: {adjusted_transfer_lamports / 1_000_000_000:.9f} SOL")
-
-            # Create transfer instruction with adjusted amount
-            transfer_instruction = transfer(
-                TransferParams(
-                    from_pubkey=keypair.pubkey(),
-                    to_pubkey=destination_pubkey,
-                    lamports=adjusted_transfer_lamports
-                )
-            )
-
-            # Create message and transaction
-            from solders.hash import Hash
-            recent_blockhash_hash = Hash.from_string(recent_blockhash)
+            # Step 7: Send transaction with detailed tracking
+            logger.info(f"🔍 [{transfer_id}] الخطوة 7: إرسال المعاملة إلى الشبكة")
             
-            message = Message.new_with_blockhash(
-                [transfer_instruction],
-                keypair.pubkey(),
-                recent_blockhash_hash
-            )
+            send_response = None
+            send_attempts = []
+            
+            for attempt in range(2):
+                send_start_time = asyncio.get_event_loop().time()
+                send_payload = {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "sendTransaction",
+                    "params": [
+                        serialized_tx,
+                        {
+                            "encoding": "base64",
+                            "maxRetries": 0,
+                            "skipPreflight": False,
+                            "preflightCommitment": "processed"
+                        }
+                    ]
+                }
 
-            transaction = Transaction([keypair], message, recent_blockhash_hash)
-
-            # Serialize transaction to base64
-            import base64
-            serialized_tx = base64.b64encode(bytes(transaction)).decode('utf-8')
-
-            # Send transaction
-            send_payload = {
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "sendTransaction",
-                "params": [
-                    serialized_tx,
-                    {
-                        "encoding": "base64",
-                        "maxRetries": 3,
-                        "skipPreflight": False
+                try:
+                    logger.info(f"📤 [{transfer_id}] إرسال المعاملة - المحاولة {attempt + 1}")
+                    send_response = await self.make_rpc_call(send_payload)
+                    send_duration = asyncio.get_event_loop().time() - send_start_time
+                    
+                    attempt_info = {
+                        'attempt': attempt + 1,
+                        'duration': send_duration,
+                        'success': send_response and 'result' in send_response,
+                        'response': send_response
                     }
-                ]
-            }
+                    send_attempts.append(attempt_info)
+                    
+                    logger.info(f"📡 [{transfer_id}] استجابة الإرسال {attempt + 1}: {'نجح' if attempt_info['success'] else 'فشل'} (وقت الاستجابة: {send_duration:.2f}s)")
+                    
+                    if send_response and 'result' in send_response:
+                        break
+                    elif send_response and 'error' in send_response:
+                        error_info = send_response.get('error', {})
+                        error_msg = error_info.get('message', 'خطأ غير محدد')
+                        error_code = error_info.get('code', 'N/A')
+                        
+                        logger.error(f"❌ [{transfer_id}] خطأ في الإرسال {attempt + 1}:")
+                        logger.error(f"   • الكود: {error_code}")
+                        logger.error(f"   • الرسالة: {error_msg}")
+                        
+                        if 'insufficient funds' in error_msg.lower():
+                            logger.error(f"💸 [{transfer_id}] خطأ أموال غير كافية - إيقاف المحاولات")
+                            return False
+                        
+                        attempt_info['error_code'] = error_code
+                        attempt_info['error_message'] = error_msg
+                        
+                except Exception as send_error:
+                    send_duration = asyncio.get_event_loop().time() - send_start_time
+                    attempt_info = {
+                        'attempt': attempt + 1,
+                        'duration': send_duration,
+                        'success': False,
+                        'exception': str(send_error)
+                    }
+                    send_attempts.append(attempt_info)
+                    logger.error(f"❌ [{transfer_id}] استثناء في الإرسال {attempt + 1}: {send_error}")
+                
+                if attempt < 1:
+                    logger.info(f"🔄 [{transfer_id}] إعادة المحاولة خلال 2 ثانية...")
+                    await asyncio.sleep(2)
 
-            send_response = await self.make_rpc_call(send_payload)
+            # Detailed send results
+            logger.info(f"📊 [{transfer_id}] تقرير إرسال المعاملة:")
+            for attempt_info in send_attempts:
+                status = "✅ نجح" if attempt_info['success'] else "❌ فشل"
+                extra_info = ""
+                if not attempt_info['success']:
+                    if 'error_code' in attempt_info:
+                        extra_info = f" - كود الخطأ: {attempt_info['error_code']}"
+                    elif 'exception' in attempt_info:
+                        extra_info = f" - استثناء: {attempt_info['exception']}"
+                
+                logger.info(f"   المحاولة {attempt_info['attempt']}: {status} (وقت الاستجابة: {attempt_info['duration']:.2f}s){extra_info}")
 
+            # Step 8: Process final response
             if send_response and 'result' in send_response:
                 tx_signature = send_response['result']
-                actual_transferred = adjusted_transfer_lamports / 1_000_000_000
-                logger.info(f"✅ Full balance auto-transfer successful! Signature: {tx_signature}")
-                logger.info(f"📤 Transferred {actual_transferred:.9f} SOL (full balance minus fees) from {truncate_address(from_wallet)} to {truncate_address(to_wallet)}")
-                logger.info(f"💰 Original balance: {current_balance} SOL, Transferred: {actual_transferred:.9f} SOL, Remaining: ~0 SOL")
+                
+                detailed_logger.info(f"AUTO-TRANSFER SUCCESSFUL!")
+                detailed_logger.info(f"Transaction Signature: {tx_signature}")
+                detailed_logger.info(f"Amount Transferred: {final_transfer_amount:.9f} SOL")
+                detailed_logger.info(f"From Wallet: {from_wallet}")
+                detailed_logger.info(f"To Wallet: {to_wallet}")
+                detailed_logger.info(f"Balance Before: {current_balance:.9f} SOL")
+                detailed_logger.info(f"Amount Transferred: {final_transfer_amount:.9f} SOL")
+                detailed_logger.info(f"Remaining for Fees: ~{TRANSFER_FEE:.9f} SOL")
+                
+                logger.info(f"🎉 [{transfer_id}] نجح التحويل التلقائي!")
+                logger.info(f"✅ [{transfer_id}] توقيع المعاملة: {tx_signature}")
+                logger.info(f"📤 [{transfer_id}] تم تحويل {final_transfer_amount:.9f} SOL")
+                logger.info(f"📍 [{transfer_id}] من: {truncate_address(from_wallet)}")
+                logger.info(f"📍 [{transfer_id}] إلى: {truncate_address(to_wallet)}")
+                logger.info(f"💰 [{transfer_id}] الرصيد قبل: {current_balance:.9f} SOL")
+                logger.info(f"💸 [{transfer_id}] المبلغ المحول: {final_transfer_amount:.9f} SOL")
+                logger.info(f"🔐 [{transfer_id}] يبقى في الحساب: ~{TRANSFER_FEE:.9f} SOL للرسوم (طبيعي)")
+                
+                # Step 9: Verify final balance
+                logger.info(f"🔍 [{transfer_id}] الخطوة 9: التحقق من الرصيد النهائي")
+                await asyncio.sleep(3)
+                
+                try:
+                    new_balance = await self.get_wallet_balance(from_wallet)
+                    logger.info(f"💰 [{transfer_id}] الرصيد النهائي: {new_balance:.9f} SOL")
+                    
+                    # Verify transfer success
+                    expected_balance = TRANSFER_FEE
+                    balance_difference = abs(new_balance - expected_balance)
+                    
+                    if balance_difference <= 0.000001:  # 1000 lamports tolerance
+                        logger.info(f"✅ [{transfer_id}] التحقق من الرصيد: مطابق للمتوقع ({expected_balance:.9f} SOL)")
+                    else:
+                        logger.warning(f"⚠️ [{transfer_id}] التحقق من الرصيد: اختلاف طفيف")
+                        logger.warning(f"   • الرصيد الفعلي: {new_balance:.9f} SOL")
+                        logger.warning(f"   • الرصيد المتوقع: {expected_balance:.9f} SOL")
+                        logger.warning(f"   • الفرق: {balance_difference:.9f} SOL")
+                    
+                except Exception as balance_verify_error:
+                    logger.warning(f"⚠️ [{transfer_id}] فشل في التحقق من الرصيد النهائي: {balance_verify_error}")
+                
+                logger.info(f"🎯 [{transfer_id}] تم إكمال التحويل التلقائي بنجاح!")
+                
+                detailed_logger.info(f"TRANSFER RESULT: SUCCESS")
+                detailed_logger.info(f"Final Status: Transfer completed successfully")
+                detailed_logger.info(f"=" * 80)
+                
                 return True
+                
             else:
-                error_msg = send_response.get('error', {}).get('message', 'Unknown error') if send_response else 'No response'
-                logger.error(f"❌ Full balance auto-transfer failed: {error_msg}")
+                # Detailed failure analysis
+                logger.error(f"❌ [{transfer_id}] فشل التحويل التلقائي!")
+                
+                if send_response and 'error' in send_response:
+                    error_info = send_response.get('error', {})
+                    error_msg = error_info.get('message', 'خطأ غير محدد')
+                    error_code = error_info.get('code', 'N/A')
+                    error_data = error_info.get('data', {})
+                    
+                    logger.error(f"📋 [{transfer_id}] تفاصيل الخطأ من الشبكة:")
+                    logger.error(f"   • كود الخطأ: {error_code}")
+                    logger.error(f"   • رسالة الخطأ: {error_msg}")
+                    
+                    if error_data:
+                        logger.error(f"   • بيانات إضافية: {error_data}")
+                    
+                    # Specific error analysis
+                    if 'insufficient funds' in error_msg.lower():
+                        logger.error(f"💸 [{transfer_id}] السبب: أموال غير كافية")
+                        logger.error(f"   • تحقق من أن الرصيد كافٍ لتغطية المبلغ والرسوم")
+                    elif 'blockhash not found' in error_msg.lower():
+                        logger.error(f"🔗 [{transfer_id}] السبب: blockhash منتهي الصلاحية")
+                        logger.error(f"   • المعاملة استغرقت وقتاً أطول من المتوقع")
+                    elif 'invalid signature' in error_msg.lower():
+                        logger.error(f"🔐 [{transfer_id}] السبب: توقيع غير صحيح")
+                        logger.error(f"   • مشكلة في المفتاح الخاص أو إنشاء المعاملة")
+                    else:
+                        logger.error(f"❓ [{transfer_id}] خطأ غير معروف - راجع الوثائق")
+                        
+                else:
+                    error_msg = 'لا توجد استجابة من الشبكة'
+                    logger.error(f"📋 [{transfer_id}] تفاصيل فشل الإرسال:")
+                    logger.error(f"   • السبب: {error_msg}")
+                    logger.error(f"   • عدد محاولات الإرسال: {len(send_attempts)}")
+                    logger.error(f"   • محاولات ناجحة: {len([a for a in send_attempts if a['success']])}")
+                
+                # Full response for debugging
+                if send_response:
+                    logger.error(f"🔍 [{transfer_id}] الاستجابة الكاملة للتشخيص:")
+                    logger.error(f"   {send_response}")
+                    
+                    detailed_logger.error(f"FULL RESPONSE FOR DEBUGGING:")
+                    detailed_logger.error(f"   {send_response}")
+                
+                detailed_logger.error(f"TRANSFER RESULT: FAILED")
+                detailed_logger.error(f"Final Status: Transfer failed after all attempts")
+                detailed_logger.info(f"=" * 80)
+                    
                 return False
 
         except Exception as e:
-            logger.error(f"❌ Exception in auto-transfer: {e}")
+            detailed_logger.error(f"CRITICAL EXCEPTION IN AUTO-TRANSFER")
+            detailed_logger.error(f"Exception: {e}")
+            detailed_logger.error(f"From Wallet: {from_wallet}")
+            detailed_logger.error(f"To Wallet: {to_wallet}")
+            detailed_logger.error(f"Key Type: {'Array' if private_key.startswith('[') else 'Base58'}")
+            detailed_logger.error(f"Key Length: {len(private_key)} characters")
+            
             import traceback
-            logger.error(traceback.format_exc())
+            detailed_logger.error(f"FULL EXCEPTION TRACEBACK:")
+            detailed_logger.error(traceback.format_exc())
+            detailed_logger.error(f"TRANSFER RESULT: CRITICAL ERROR")
+            detailed_logger.info(f"=" * 80)
+            
+            logger.error(f"❌ [{transfer_id}] استثناء حرج في التحويل التلقائي: {e}")
+            logger.error(f"📋 [{transfer_id}] تفاصيل الاستثناء الكاملة:\n{traceback.format_exc()}")
+            logger.error(f"🔧 [{transfer_id}] معلومات إضافية للتشخيص:")
+            logger.error(f"   • المحفظة المرسلة: {from_wallet}")
+            logger.error(f"   • المحفظة المستقبلة: {to_wallet}")
+            logger.error(f"   • نوع المفتاح: {'Array' if private_key.startswith('[') else 'Base58'}")
+            logger.error(f"   • طول المفتاح: {len(private_key)} حرف")
             return False
 
     async def get_wallet_balance(self, wallet_address: str) -> float:
-        """Get SOL balance for a wallet address with smart rate limiting"""
+        """Get SOL balance for a wallet address with enhanced accuracy and anti-false-zero protection"""
         try:
+            # Try with different commitment levels for better accuracy
+            commitment_levels = ["finalized", "confirmed", "processed"]
+            
+            balance_results = []  # Store all successful balance readings
+            
+            for commitment in commitment_levels:
+                try:
+                    payload = {
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "getBalance",
+                        "params": [
+                            wallet_address,
+                            {"commitment": commitment}
+                        ]
+                    }
+
+                    data = await self.make_rpc_call(payload, max_retries=2)
+                    if data and 'result' in data and 'value' in data['result']:
+                        lamports = data['result']['value']
+                        sol_balance = lamports / 1_000_000_000  # Convert to SOL
+                        
+                        balance_results.append({
+                            'commitment': commitment,
+                            'balance': sol_balance,
+                            'lamports': lamports
+                        })
+                        
+                        # Log the successful commitment level for debugging
+                        logger.debug(f"💰 Balance with {commitment}: {sol_balance:.9f} SOL ({lamports} lamports)")
+                        
+                        # If we get a positive balance with finalized commitment, prefer it
+                        if commitment == "finalized" and sol_balance > 0:
+                            return sol_balance
+                    
+                except Exception as e:
+                    logger.debug(f"Balance check failed with {commitment} commitment: {e}")
+                    continue
+            
+            # Analyze results to avoid false zero readings
+            if balance_results:
+                # Prefer non-zero balances over zero balances
+                non_zero_results = [r for r in balance_results if r['balance'] > 0]
+                
+                if non_zero_results:
+                    # Return the balance from the most reliable commitment level with non-zero balance
+                    for commitment in ["finalized", "confirmed", "processed"]:
+                        for result in non_zero_results:
+                            if result['commitment'] == commitment:
+                                logger.debug(f"💰 Selected {commitment} balance: {result['balance']:.9f} SOL (anti-false-zero)")
+                                return result['balance']
+                    
+                    # Fallback: return first non-zero balance
+                    selected = non_zero_results[0]
+                    logger.debug(f"💰 Fallback to first non-zero balance: {selected['balance']:.9f} SOL")
+                    return selected['balance']
+                else:
+                    # All results were zero - return the most reliable zero
+                    for commitment in ["finalized", "confirmed", "processed"]:
+                        for result in balance_results:
+                            if result['commitment'] == commitment:
+                                logger.debug(f"💰 All balances zero, selected {commitment}: {result['balance']:.9f} SOL")
+                                return result['balance']
+
+            # If all commitment levels failed, try basic call without commitment
             payload = {
                 "jsonrpc": "2.0",
                 "id": 1,
@@ -1885,13 +2450,14 @@ class SolanaMonitor:
                 "params": [wallet_address]
             }
 
-            # Use smart rate limiting with retries
-            data = await self.make_rpc_call(payload, max_retries=2)
+            data = await self.make_rpc_call(payload, max_retries=3)
             if data and 'result' in data and 'value' in data['result']:
                 lamports = data['result']['value']
-                sol_balance = lamports / 1_000_000_000  # Convert to SOL
+                sol_balance = lamports / 1_000_000_000
+                logger.debug(f"💰 Balance check successful (fallback): {sol_balance:.9f} SOL")
                 return sol_balance
 
+            logger.warning(f"❌ All balance check methods failed for {wallet_address[:8]}...")
             return 0.0
 
         except Exception as e:
@@ -1899,7 +2465,7 @@ class SolanaMonitor:
             return 0.0
 
     def calculate_balance_change(self, transaction: dict, wallet_address: str) -> tuple[str, str]:
-        """Calculate balance change and transaction type for the monitored wallet"""
+        """Calculate balance change and transaction type for the monitored wallet with accurate fee handling"""
         try:
             meta = transaction.get('meta', {})
             account_keys = transaction.get('transaction', {}).get('message', {}).get('accountKeys', [])
@@ -1921,8 +2487,26 @@ class SolanaMonitor:
             if len(pre_balances) > wallet_index and len(post_balances) > wallet_index:
                 pre_balance = pre_balances[wallet_index]
                 post_balance = post_balances[wallet_index]
-                change = post_balance - pre_balance
-                amount = format_sol_amount(change)
+                
+                # Calculate net balance change
+                net_change = post_balance - pre_balance
+                
+                # Get transaction fee info for more accurate reporting
+                fee = meta.get('fee', 0)
+                
+                # For outgoing transactions, add back the fee to show actual sent amount
+                if net_change < 0 and fee > 0:
+                    # This is likely an outgoing transaction
+                    actual_sent_amount = abs(net_change)  # Use net change (already includes fees)
+                    amount = format_sol_amount(-actual_sent_amount)
+                    logger.info(f"🔍 Outgoing transaction analysis: Net change: {format_sol_amount(net_change)}, Fee: {format_sol_amount(fee)}, Reported amount: {amount}")
+                else:
+                    # Incoming transaction - use net change as is
+                    amount = format_sol_amount(net_change)
+                    if net_change > 0:
+                        logger.info(f"🔍 Incoming transaction analysis: Net received: {amount} SOL (after network fees)")
+                
+                change = net_change
 
                 # Check for trading/DEX programs FIRST before checking balance direction
                 instructions = transaction.get('transaction', {}).get('message', {}).get('instructions', [])
