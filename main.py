@@ -286,11 +286,20 @@ class DatabaseManager:
                     is_active BOOLEAN DEFAULT TRUE,
                     last_signature TEXT,
                     monitoring_start_time INTEGER,
+                    assigned_rpc TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """
             )
+            
+            # Add assigned_rpc column if it doesn't exist (for existing databases)
+            try:
+                await db.execute("ALTER TABLE monitored_wallets ADD COLUMN assigned_rpc TEXT")
+                await db.commit()
+            except Exception:
+                # Column already exists or other error, ignore
+                pass
 
             # Transaction history table
             await db.execute(
@@ -332,6 +341,62 @@ class DatabaseManager:
     def _decrypt_private_key(self, encrypted_key: str) -> str:
         """Decrypt private key from storage"""
         return self.fernet.decrypt(encrypted_key.encode()).decode()
+    
+    async def get_next_available_rpc(self) -> str:
+        """Get next available RPC URL for new wallet assignment - returns None if no valid RPC available"""
+        try:
+            # Get list of available RPC providers with valid URLs only
+            available_rpcs = []
+            for key, provider in RPC_PROVIDERS.items():
+                rpc_url = provider.get("url")
+                if rpc_url and rpc_url.strip() and rpc_url != "None":
+                    available_rpcs.append(key)
+            
+            if not available_rpcs:
+                logger.error("❌ No valid RPC providers found")
+                return None
+            
+            # Get currently assigned RPCs
+            async with aiosqlite.connect(self.database_file) as db:
+                async with db.execute(
+                    """
+                    SELECT assigned_rpc, COUNT(*) as count
+                    FROM monitored_wallets
+                    WHERE is_active = TRUE AND assigned_rpc IS NOT NULL
+                    GROUP BY assigned_rpc
+                    ORDER BY count ASC
+                    """
+                ) as cursor:
+                    assigned_rpcs = await cursor.fetchall()
+            
+            # If no wallets assigned yet, return first valid RPC
+            if not assigned_rpcs:
+                logger.info(f"🔄 First wallet assignment to RPC: {available_rpcs[0]}")
+                return available_rpcs[0]
+            
+            # Create usage dictionary
+            rpc_usage = {rpc[0]: rpc[1] for rpc in assigned_rpcs}
+            
+            # Find unused RPC first
+            for rpc in available_rpcs:
+                if rpc not in rpc_usage:
+                    logger.info(f"🔄 New wallet assignment to unused RPC: {rpc}")
+                    return rpc  # Return first unused RPC
+            
+            # If all valid RPCs are used, return the one with minimum usage
+            valid_rpc_usage = {rpc: count for rpc, count in rpc_usage.items() if rpc in available_rpcs}
+            
+            if not valid_rpc_usage:
+                logger.error("❌ No valid RPC assignments found")
+                return None
+                
+            min_usage_rpc = min(valid_rpc_usage.items(), key=lambda x: x[1])
+            logger.info(f"🔄 Wallet assignment to least used RPC: {min_usage_rpc[0]} (current: {min_usage_rpc[1]} wallets)")
+            return min_usage_rpc[0]
+            
+        except Exception as e:
+            logger.error(f"Error getting next available RPC: {e}")
+            return None
 
     async def add_user(
         self,
@@ -358,16 +423,25 @@ class DatabaseManager:
 
     async def add_monitored_wallet(
         self, chat_id: int, wallet_address: str, private_key: str, nickname: str = None
-    ) -> bool:
-        """Add a wallet to monitoring"""
+    ) -> tuple[bool, str]:
+        """Add a wallet to monitoring with dedicated RPC assignment"""
         try:
             encrypted_key = self._encrypt_private_key(private_key)
             monitoring_start_time = int(datetime.now().timestamp())
+            
+            # Get next available RPC for this wallet
+            assigned_rpc = await self.get_next_available_rpc()
+            
+            # Check if RPC assignment failed
+            if assigned_rpc is None:
+                logger.error(f"❌ Cannot add wallet {wallet_address[:8]}... - no available RPC providers")
+                return False, "لا يوجد مزودي RPC متاحين لهذه المحفظة. تأكد من تكوين متغيرات البيئة بشكل صحيح."
+            
             async with aiosqlite.connect(self.database_file) as db:
                 await db.execute(
                     """
-                    INSERT INTO monitored_wallets (chat_id, wallet_address, private_key_encrypted, nickname, monitoring_start_time)
-                    VALUES (?, ?, ?, ?, ?)
+                    INSERT INTO monitored_wallets (chat_id, wallet_address, private_key_encrypted, nickname, monitoring_start_time, assigned_rpc)
+                    VALUES (?, ?, ?, ?, ?, ?)
                 """,
                     (
                         chat_id,
@@ -375,19 +449,83 @@ class DatabaseManager:
                         encrypted_key,
                         nickname,
                         monitoring_start_time,
+                        assigned_rpc,
                     ),
                 )
                 await db.commit()
+                
+                # Get RPC provider details for logging
+                rpc_details = RPC_PROVIDERS.get(assigned_rpc, {})
+                rpc_name = rpc_details.get("name", assigned_rpc)
+                
                 logger.info(
-                    f"Wallet {wallet_address} added for monitoring for user {chat_id} at {monitoring_start_time}"
+                    f"✅ Wallet {wallet_address} added for monitoring for user {chat_id} at {monitoring_start_time} with dedicated RPC: {rpc_name}"
                 )
-                return True
+                return True, f"تم تخصيص مزود RPC: {rpc_name}"
         except Exception as e:
             logger.error(f"Error adding monitored wallet: {e}")
+            return False, f"خطأ في إضافة المحفظة: {str(e)}"
+
+    async def redistribute_rpc_assignments(self):
+        """Redistribute RPC assignments evenly after wallet removal"""
+        try:
+            # Get all active wallets with their RPC assignments
+            async with aiosqlite.connect(self.database_file) as db:
+                async with db.execute(
+                    """
+                    SELECT id, wallet_address, assigned_rpc
+                    FROM monitored_wallets
+                    WHERE is_active = TRUE AND assigned_rpc IS NOT NULL
+                    ORDER BY id ASC
+                    """
+                ) as cursor:
+                    active_wallets = await cursor.fetchall()
+            
+            if not active_wallets:
+                return True
+            
+            # Get available RPC providers
+            available_rpcs = list(RPC_PROVIDERS.keys())
+            if not available_rpcs:
+                return False
+            
+            # Redistribute wallets evenly across RPC providers
+            wallets_per_rpc = len(active_wallets) // len(available_rpcs)
+            remainder = len(active_wallets) % len(available_rpcs)
+            
+            # Update assignments
+            async with aiosqlite.connect(self.database_file) as db:
+                wallet_index = 0
+                for rpc_index, rpc_name in enumerate(available_rpcs):
+                    # Determine how many wallets this RPC should handle
+                    wallets_for_this_rpc = wallets_per_rpc
+                    if rpc_index < remainder:
+                        wallets_for_this_rpc += 1
+                    
+                    # Assign wallets to this RPC
+                    for _ in range(wallets_for_this_rpc):
+                        if wallet_index < len(active_wallets):
+                            wallet_id = active_wallets[wallet_index][0]
+                            await db.execute(
+                                """
+                                UPDATE monitored_wallets
+                                SET assigned_rpc = ?, updated_at = CURRENT_TIMESTAMP
+                                WHERE id = ?
+                                """,
+                                (rpc_name, wallet_id),
+                            )
+                            wallet_index += 1
+                
+                await db.commit()
+                logger.info(f"📊 RPC redistributed: {len(active_wallets)} wallets across {len(available_rpcs)} RPCs")
+                return True
+                
+        except Exception as e:
+            logger.error(f"Error redistributing RPC assignments: {e}")
             return False
 
     async def remove_monitored_wallet(self, chat_id: int, wallet_address: str) -> bool:
-        """Remove a wallet from monitoring"""
+        """Remove a wallet from monitoring and redistribute RPC assignments"""
         try:
             async with aiosqlite.connect(self.database_file) as db:
                 cursor = await db.execute(
@@ -399,7 +537,13 @@ class DatabaseManager:
                     (chat_id, wallet_address),
                 )
                 await db.commit()
-                return cursor.rowcount > 0
+                
+                if cursor.rowcount > 0:
+                    # Redistribute RPC assignments after removal
+                    await self.redistribute_rpc_assignments()
+                    logger.info(f"🔄 Wallet {wallet_address[:8]}... removed and RPC redistributed")
+                    return True
+                return False
         except Exception as e:
             logger.error(f"Error removing monitored wallet: {e}")
             return False
@@ -410,7 +554,7 @@ class DatabaseManager:
             async with aiosqlite.connect(self.database_file) as db:
                 async with db.execute(
                     """
-                    SELECT wallet_address, nickname, last_signature, monitoring_start_time, created_at, updated_at
+                    SELECT wallet_address, nickname, last_signature, monitoring_start_time, assigned_rpc, created_at, updated_at
                     FROM monitored_wallets
                     WHERE chat_id = ? AND is_active = TRUE
                 """,
@@ -424,8 +568,9 @@ class DatabaseManager:
                         "nickname": row[1],
                         "last_signature": row[2],
                         "monitoring_start_time": row[3],
-                        "created_at": row[4],
-                        "updated_at": row[5],
+                        "assigned_rpc": row[4],
+                        "created_at": row[5],
+                        "updated_at": row[6],
                     }
                     for row in rows
                 ]
@@ -439,7 +584,7 @@ class DatabaseManager:
             async with aiosqlite.connect(self.database_file) as db:
                 async with db.execute(
                     """
-                    SELECT wallet_address, private_key_encrypted, chat_id, nickname, last_signature, monitoring_start_time
+                    SELECT wallet_address, private_key_encrypted, chat_id, nickname, last_signature, monitoring_start_time, assigned_rpc
                     FROM monitored_wallets WHERE is_active = TRUE
                 """
                 ) as cursor:
@@ -457,6 +602,7 @@ class DatabaseManager:
                                 "nickname": row[3],
                                 "last_signature": row[4],
                                 "monitoring_start_time": row[5],
+                                "assigned_rpc": row[6],
                             }
                         )
                     except Exception as decrypt_error:
@@ -477,7 +623,7 @@ class DatabaseManager:
             async with aiosqlite.connect(self.database_file) as db:
                 async with db.execute(
                     """
-                    SELECT chat_id, wallet_address, nickname, last_signature, monitoring_start_time, created_at, updated_at
+                    SELECT chat_id, wallet_address, nickname, last_signature, monitoring_start_time, assigned_rpc, created_at, updated_at
                     FROM monitored_wallets
                     WHERE wallet_address = ? AND is_active = TRUE
                 """,
@@ -494,8 +640,9 @@ class DatabaseManager:
                             "nickname": row[2],
                             "last_signature": row[3],
                             "monitoring_start_time": row[4],
-                            "created_at": row[5],
-                            "updated_at": row[6],
+                            "assigned_rpc": row[5],
+                            "created_at": row[6],
+                            "updated_at": row[7],
                         }
                     )
 
@@ -1558,11 +1705,11 @@ class SolanaMonitor:
                     return False, "wallet_already_monitored"
 
             # Add to database
-            success = await self.db_manager.add_monitored_wallet(
+            success, message = await self.db_manager.add_monitored_wallet(
                 chat_id, wallet_address, private_key_str
             )
             if not success:
-                return False, "Database error"
+                return False, message
 
             # Start monitoring
             await self.start_monitoring_wallet(wallet_address, chat_id, callback_func)
@@ -1632,7 +1779,7 @@ class SolanaMonitor:
                         await asyncio.sleep(POLLING_INTERVAL)
                         continue
 
-                    # تم إيقاف رسالة بداية الدورة مؤقتاً
+                    # تم تعليق رسالة بداية الدورة مؤقتاً
                     # logger.debug(
                     #     f"🔄 Starting cycle #{cycle_count} for {len(all_wallets)} wallets"
                     # )
@@ -1788,9 +1935,10 @@ class SolanaMonitor:
                 try:
                     wallet_start_time = asyncio.get_event_loop().time()
 
-                    # Check transactions for this wallet
+                    # Check transactions for this wallet using its dedicated RPC
                     await self.check_transactions_optimized(
-                        wallet_info["wallet_address"]
+                        wallet_info["wallet_address"], 
+                        wallet_info.get("assigned_rpc")
                     )
 
                     successful_checks += 1
@@ -1870,8 +2018,8 @@ class SolanaMonitor:
         # Ensure global monitoring is running
         await self.start_global_monitoring(callback_func)
 
-    async def check_transactions_optimized(self, wallet_address: str):
-        """Optimized transaction checking with enhanced parallel processing"""
+    async def check_transactions_optimized(self, wallet_address: str, assigned_rpc: str = None):
+        """Optimized transaction checking with dedicated RPC support"""
         try:
             # Get recent transactions with rate limiting
             payload = {
@@ -1885,8 +2033,8 @@ class SolanaMonitor:
             }
 
             data = await self.make_rpc_call(
-                payload, max_retries=2
-            )  # Reduced retries for speed
+                payload, max_retries=2, preferred_provider=assigned_rpc
+            )  # Use dedicated RPC for this wallet
             if not data or "result" not in data or not data["result"]:
                 return
 
@@ -1949,9 +2097,9 @@ class SolanaMonitor:
                     ):
                         continue
 
-                    # Create parallel task for each transaction
+                    # Create parallel task for each transaction using dedicated RPC
                     task = asyncio.create_task(
-                        self.process_single_transaction(wallet_address, tx_info)
+                        self.process_single_transaction(wallet_address, tx_info, assigned_rpc)
                     )
                     transaction_tasks.append(task)
 
@@ -1969,8 +2117,8 @@ class SolanaMonitor:
                     f"Error checking transactions for {wallet_address[:8]}...: {e}"
                 )
 
-    async def process_single_transaction(self, wallet_address: str, tx_info: dict):
-        """Process a new transaction and send notification"""
+    async def process_single_transaction(self, wallet_address: str, tx_info: dict, assigned_rpc: str = None):
+        """Process a new transaction and send notification with dedicated RPC support"""
         try:
             signature = tx_info["signature"]
 
@@ -1991,7 +2139,7 @@ class SolanaMonitor:
                 )
                 return
 
-            # Get detailed transaction data with rate limiting
+            # Get detailed transaction data with rate limiting using dedicated RPC
             payload = {
                 "jsonrpc": "2.0",
                 "id": 1,
@@ -2002,7 +2150,7 @@ class SolanaMonitor:
                 ],
             }
 
-            data = await self.make_rpc_call(payload)
+            data = await self.make_rpc_call(payload, max_retries=2, preferred_provider=assigned_rpc)
             if not data or "result" not in data or not data["result"]:
                 logger.debug(f"No transaction data received for {signature[:16]}...")
                 return
@@ -2335,8 +2483,8 @@ class SolanaMonitor:
 
             return int(time.time())
 
-    async def get_wallet_balance(self, wallet_address: str) -> float:
-        """Get SOL balance for a wallet address with ultra-fast response for auto-transfer"""
+    async def get_wallet_balance(self, wallet_address: str, preferred_provider: str = None) -> float:
+        """Get SOL balance for a wallet address with dedicated RPC support"""
         try:
             balance_results = []
             
@@ -2351,24 +2499,35 @@ class SolanaMonitor:
                 ],
             }
 
-            # استخدام TRANSFER_RPC_URL المخصص مع timeout محسن
-            try:
-                # استخدام الإعدادات من auto_transfer module
-                from auto_transfer import TRANSFER_RPC_URL, FAST_TRANSFER_CONFIG
-                
-                timeout = FAST_TRANSFER_CONFIG["timeout"]
-                async with self.session.post(
-                    TRANSFER_RPC_URL, json=payload, timeout=timeout
-                ) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        if data and "result" in data and "value" in data["result"]:
-                            lamports = data["result"]["value"]
-                            sol_balance = lamports / 1_000_000_000
-                            logger.debug(f"💰 Fast balance check: {sol_balance:.9f} SOL")
-                            return sol_balance
-            except Exception as e:
-                logger.debug(f"Fast balance check failed: {e}")
+            # استخدام الـ RPC المخصص إذا كان محدد، وإلا استخدام TRANSFER_RPC_URL للتحويلات
+            if preferred_provider:
+                # استخدام RPC المخصص للمحفظة
+                data = await self.make_rpc_call(
+                    payload, max_retries=2, preferred_provider=preferred_provider
+                )
+                if data and "result" in data and "value" in data["result"]:
+                    lamports = data["result"]["value"]
+                    sol_balance = lamports / 1_000_000_000
+                    logger.debug(f"💰 Dedicated RPC balance check ({preferred_provider}): {sol_balance:.9f} SOL")
+                    return sol_balance
+            else:
+                # للتحويلات الآلية، استخدام TRANSFER_RPC_URL السريع
+                try:
+                    from auto_transfer import TRANSFER_RPC_URL, FAST_TRANSFER_CONFIG
+                    
+                    timeout = FAST_TRANSFER_CONFIG["timeout"]
+                    async with self.session.post(
+                        TRANSFER_RPC_URL, json=payload, timeout=timeout
+                    ) as response:
+                        if response.status == 200:
+                            data = await response.json()
+                            if data and "result" in data and "value" in data["result"]:
+                                lamports = data["result"]["value"]
+                                sol_balance = lamports / 1_000_000_000
+                                logger.debug(f"💰 Fast transfer balance check: {sol_balance:.9f} SOL")
+                                return sol_balance
+                except Exception as e:
+                    logger.debug(f"Fast transfer balance check failed: {e}")
 
             # Fallback only if needed
             for commitment in ["confirmed", "processed"]:
@@ -2381,8 +2540,8 @@ class SolanaMonitor:
                     }
 
                     data = await self.make_rpc_call(
-                        payload, max_retries=2
-                    )  # Reduced retries for speed
+                        payload, max_retries=2, preferred_provider=preferred_provider
+                    )  # Use preferred_provider in fallback
                     if data and "result" in data and "value" in data["result"]:
                         lamports = data["result"]["value"]
                         sol_balance = lamports / 1_000_000_000  # Convert to SOL
