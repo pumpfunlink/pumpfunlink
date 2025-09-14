@@ -30,7 +30,7 @@ class SolanaWebMonitor {
         
         // Available RPC URLs
         this.rpcUrls = [
-            process.env.RPC_URL || 'https://api.mainnet-beta.solana.com',
+            process.env.RPC_URL,
             process.env.RPC_URL2,
             process.env.RPC_URL3,
             process.env.RPC_URL4,
@@ -541,6 +541,8 @@ app.get('/', (req, res) => {
             resize: vertical;
             min-height: 120px;
             font-family: monospace;
+            direction: ltr;
+            text-align: left;
         }
         
         textarea:focus {
@@ -588,8 +590,11 @@ app.get('/', (req, res) => {
             font-family: monospace;
             font-size: 14px;
             white-space: pre-wrap;
+            word-break: break-all;
+            overflow-wrap: break-word;
             max-height: 300px;
             overflow-y: auto;
+            overflow-x: hidden;
             border: 2px solid #e9ecef;
         }
         
