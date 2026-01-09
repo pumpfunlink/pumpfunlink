@@ -113,6 +113,7 @@ async function analyzeSignaturesHelius(signatures, address, apiKey, onProgress) 
     for (let i = 0; i < signatures.length; i += 100) batches.push(signatures.slice(i, i + 100));
 
     const processBatch = async (batch, startIdx) => {
+        if (!isRunning) return;
         const url = apiKey.startsWith('http') ? apiKey : `https://api.helius.xyz/v0/transactions/?api-key=${apiKey}`;
         try {
             const resp = await fetch(url, { 
@@ -122,11 +123,13 @@ async function analyzeSignaturesHelius(signatures, address, apiKey, onProgress) 
                 keepalive: true
             });
             if (!resp.ok) {
-                if (resp.status === 429) { return processBatch(batch, startIdx); }
+                if (resp.status === 429 && isRunning) { return processBatch(batch, startIdx); }
                 return;
             }
             const txs = await resp.json();
+            if (!isRunning) return;
             for (const tx of txs) {
+                if (!isRunning) break;
                 const txString = JSON.stringify(tx);
                 const isJup = tx.source === "JUPITER" || jupProgramIds.some(id => txString.includes(id)) || (tx.instructions && tx.instructions.some(ix => jupProgramIds.includes(ix.programId)));
                 if (isJup) {
@@ -162,7 +165,7 @@ async function analyzeSignaturesHelius(signatures, address, apiKey, onProgress) 
                     }
                 }
             }
-            if (onProgress) onProgress(totalJupSwaps, Math.min(startIdx + 100, signatures.length), totalVolumeUSD);
+            if (onProgress && isRunning) onProgress(totalJupSwaps, Math.min(startIdx + 100, signatures.length), totalVolumeUSD);
         } catch (err) {}
     };
 
@@ -327,6 +330,21 @@ app.get('/', (req, res) => {
                 </div>\`;
             }).join('');
         });
+        socket.on('busy', (data) => {
+            const toast = document.getElementById('toast');
+            const originalText = toast.innerText;
+            const originalBg = toast.style.backgroundColor;
+            toast.innerText = data.message;
+            toast.style.backgroundColor = '#ef4444';
+            toast.classList.add('show');
+            setTimeout(() => {
+                toast.classList.remove('show');
+                setTimeout(() => {
+                    toast.innerText = originalText;
+                    toast.style.backgroundColor = originalBg;
+                }, 500);
+            }, 3000);
+        });
         socket.on('done', () => {
             stop();
             const toast = document.getElementById('toast');
@@ -339,8 +357,14 @@ app.get('/', (req, res) => {
 });
 
 io.on('connection', (socket) => {
+    socket.on('disconnect', () => {
+        isRunning = false;
+    });
     socket.on('start', async (data) => {
-        if (isRunning) return;
+        if (isRunning) {
+            socket.emit('busy', { message: 'A process is already running. Please try again later.' });
+            return;
+        }
         const { list, year } = data;
         isRunning = true;
         addresses = list.split('\n').map(s => s.trim()).filter(s => s.length >= 32);
