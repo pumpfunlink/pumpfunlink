@@ -108,7 +108,7 @@ async function analyzeSignaturesHelius(signatures, address, apiKey, onProgress) 
     const jupProgramIds = ["JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4", "JUP4Fb2cqiRUcaTHdrPC8h2gNsA2ETXiPDD33WcGuJB", "DCA265Vj8a9CEuX1eb1LWRnDT7uK6q1xMipnNyatn23M", "j1o2qRpjcyUwEvwtcfhEQefh773ZgjxcVRry7LDqg5X"];
     const usdcMint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
     const usdtMint = "Es9vMFrzaDC6is695G2C48LswSt53n4n8zVLLt39G75";
-    const concurrency = 25;
+    const concurrency = 5;
     const batches = [];
     for (let i = 0; i < signatures.length; i += 100) batches.push(signatures.slice(i, i + 100));
 
@@ -120,16 +120,23 @@ async function analyzeSignaturesHelius(signatures, address, apiKey, onProgress) 
                 method: "POST", 
                 headers: { "Content-Type": "application/json" }, 
                 body: JSON.stringify({ transactions: batch }),
-                keepalive: true
+                // keepalive can cause issues on memory-limited environments like Render Free
+                keepalive: false
             });
             if (!resp.ok) {
-                if (resp.status === 429 && isRunning) { return processBatch(batch, startIdx); }
+                if (resp.status === 429 && isRunning) { 
+                    await sleep(5000); // Back off more aggressively on free tiers
+                    return processBatch(batch, startIdx); 
+                }
                 return;
             }
             const txs = await resp.json();
             if (!isRunning) return;
-            for (const tx of txs) {
+            // Process transactions in smaller chunks to avoid blocking the event loop
+            for (let i = 0; i < txs.length; i++) {
+                if (i % 20 === 0) await new Promise(resolve => setImmediate(resolve));
                 if (!isRunning) break;
+                const tx = txs[i];
                 const txString = JSON.stringify(tx);
                 const isJup = tx.source === "JUPITER" || jupProgramIds.some(id => txString.includes(id)) || (tx.instructions && tx.instructions.some(ix => jupProgramIds.includes(ix.programId)));
                 if (isJup) {
@@ -357,9 +364,14 @@ app.get('/', (req, res) => {
 });
 
 io.on('connection', (socket) => {
-    socket.on('disconnect', () => {
-        isRunning = false;
-    });
+        socket.on('disconnect', () => {
+            // Check if there are other connected clients before stopping
+            io.fetchSockets().then(sockets => {
+                if (sockets.length === 0) {
+                    isRunning = false;
+                }
+            });
+        });
     socket.on('start', async (data) => {
         if (isRunning) {
             socket.emit('busy', { message: 'A process is already running. Please try again later.' });
