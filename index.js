@@ -33,11 +33,12 @@ const ALCHEMY_URLS = ALCHEMY_KEYS.map(key => `https://solana-mainnet.g.alchemy.c
 
 const sleep = ms => wait(ms);
 
-let isRunning = false;
-let activeProgress = new Map();
-let results = [];
-let nextAddressIndex = 0;
-let addresses = [];
+// Removed global state to isolate user sessions
+// let isRunning = false;
+// let activeProgress = new Map();
+// let results = [];
+// let nextAddressIndex = 0;
+// let addresses = [];
 
 async function getJupiterBalances(address) {
     return null;
@@ -203,11 +204,30 @@ async function checkRpcHealth(url, method = "getHealth") {
 app.get('/health', async (req, res) => {
     const heliusStatus = await Promise.all(HELIUS_URLS.map(url => checkRpcHealth(url, "getAsset")));
     const alchemyStatus = await Promise.all(ALCHEMY_URLS.map(url => checkRpcHealth(url)));
+    
+    // Logic to identify unhealthy providers
+    const healthyHelius = HELIUS_URLS.filter((_, i) => heliusStatus[i]);
+    const healthyAlchemy = ALCHEMY_URLS.filter((_, i) => alchemyStatus[i]);
+
     res.json({
         helius: heliusStatus.filter(Boolean).length,
-        alchemy: alchemyStatus.filter(Boolean).length
+        alchemy: alchemyStatus.filter(Boolean).length,
+        details: {
+            helius: heliusStatus,
+            alchemy: alchemyStatus
+        }
     });
 });
+
+async function getHealthyProviders() {
+    const heliusStatus = await Promise.all(HELIUS_URLS.map(url => checkRpcHealth(url, "getAsset")));
+    const alchemyStatus = await Promise.all(ALCHEMY_URLS.map(url => checkRpcHealth(url)));
+    
+    const healthyHelius = HELIUS_KEYS.filter((_, i) => heliusStatus[i]);
+    const healthyAlchemy = ALCHEMY_URLS.filter((_, i) => alchemyStatus[i]);
+    
+    return { healthyHelius, healthyAlchemy };
+}
 
 app.get('/', (req, res) => {
     res.send(`
@@ -364,61 +384,78 @@ app.get('/', (req, res) => {
 });
 
 io.on('connection', (socket) => {
-        socket.on('disconnect', () => {
-            // Check if there are other connected clients before stopping
-            io.fetchSockets().then(sockets => {
-                if (sockets.length === 0) {
-                    isRunning = false;
-                }
-            });
-        });
+    socket.isRunning = false;
+    socket.on('disconnect', () => {
+        socket.isRunning = false;
+    });
     socket.on('start', async (data) => {
-        if (isRunning) {
-            socket.emit('busy', { message: 'A process is already running. Please try again later.' });
+        if (socket.isRunning) {
+            socket.emit('busy', { message: 'A process is already running in this session.' });
             return;
         }
         const { list, year } = data;
-        isRunning = true;
-        addresses = list.split('\n').map(s => s.trim()).filter(s => s.length >= 32);
-        results = [];
-        activeProgress.clear();
-        nextAddressIndex = 0;
+        socket.isRunning = true;
+        const socketAddresses = list.split('\n').map(s => s.trim()).filter(s => s.length >= 32);
+        const socketResults = [];
+        const socketActiveProgress = new Map();
+        let socketNextAddressIndex = 0;
+
         const broadcast = () => socket.emit('update', { 
-            total: addresses.length, 
-            current: results.length, 
-            active: Array.from(activeProgress.entries()).map(([addr, val]) => ({ address: addr, ...val })), 
-            results,
+            total: socketAddresses.length, 
+            current: socketResults.length, 
+            active: Array.from(socketActiveProgress.entries()).map(([addr, val]) => ({ address: addr, ...val })), 
+            results: socketResults,
             providers: {
                 helius: HELIUS_KEYS.length,
                 alchemy: ALCHEMY_KEYS.length
             }
         });
         const timer = setInterval(broadcast, 500);
-        const workers = (HELIUS_KEYS.length > 0 ? HELIUS_KEYS : []).map(async (heliusKey, idx) => {
-            const alchemyUrl = ALCHEMY_URLS[idx % ALCHEMY_URLS.length];
-            while (isRunning && nextAddressIndex < addresses.length) {
-                const addr = addresses[nextAddressIndex++];
-                activeProgress.set(addr, { stage: "Fetching", tx: 0, vol: 0 });
+
+        // Smart Rotation: Only use healthy providers
+        const { healthyHelius, healthyAlchemy } = await getHealthyProviders();
+        
+        if (healthyHelius.length === 0 || healthyAlchemy.length === 0) {
+            socket.emit('busy', { message: 'No healthy RPC providers available. Please check your API keys.' });
+            socket.isRunning = false;
+            clearInterval(timer);
+            return;
+        }
+
+        const workers = healthyHelius.map(async (heliusKey, idx) => {
+            let alchemyIdx = idx % healthyAlchemy.length;
+            while (socket.isRunning && socketNextAddressIndex < socketAddresses.length) {
+                const addr = socketAddresses[socketNextAddressIndex++];
+                socketActiveProgress.set(addr, { stage: "Fetching", tx: 0, vol: 0 });
                 try {
-                    const sigs = await getSignaturesFromAlchemy(addr, alchemyUrl, year);
-                    if (!isRunning) break;
-                    if (sigs.length === 0) results.push({ address: addr, usage: 0, volume: 0, totalAnalyzed: 0 });
+                    let sigs = [];
+                    let retryAlchemy = 0;
+                    while (retryAlchemy < healthyAlchemy.length) {
+                        const alchemyUrl = healthyAlchemy[(alchemyIdx + retryAlchemy) % healthyAlchemy.length];
+                        sigs = await getSignaturesFromAlchemy(addr, alchemyUrl, year);
+                        if (sigs.length > 0 || !socket.isRunning) break;
+                        retryAlchemy++;
+                    }
+
+                    if (!socket.isRunning) break;
+                    if (sigs.length === 0) socketResults.push({ address: addr, usage: 0, volume: 0, totalAnalyzed: 0 });
                     else {
-                        activeProgress.set(addr, { stage: "Analyzing", tx: 0, total: sigs.length, vol: 0 });
+                        socketActiveProgress.set(addr, { stage: "Analyzing", tx: 0, total: sigs.length, vol: 0 });
                         const d = await analyzeSignaturesHelius(sigs, addr, heliusKey, (c, curr, v) => {
-                            if (isRunning) activeProgress.set(addr, { stage: "Analyzing", tx: curr, total: sigs.length, vol: v });
+                            if (socket.isRunning) socketActiveProgress.set(addr, { stage: "Analyzing", tx: curr, total: sigs.length, vol: v });
                         });
-                        if (isRunning) results.push({ address: addr, usage: d.count, volume: d.volume, totalAnalyzed: d.totalAnalyzed });
+                        if (socket.isRunning) socketResults.push({ address: addr, usage: d.count, volume: d.volume, totalAnalyzed: d.totalAnalyzed });
                     }
                 } catch (e) { 
-                    if (isRunning) results.push({ address: addr, usage: 0, volume: 0, totalAnalyzed: 0, error: true }); 
+                    if (socket.isRunning) socketResults.push({ address: addr, usage: 0, volume: 0, totalAnalyzed: 0, error: true }); 
                 }
-                activeProgress.delete(addr);
+                socketActiveProgress.delete(addr);
+                alchemyIdx = (alchemyIdx + 1) % healthyAlchemy.length;
             }
         });
         await Promise.all(workers);
-        clearInterval(timer); broadcast(); socket.emit('done'); isRunning = false;
+        clearInterval(timer); broadcast(); socket.emit('done'); socket.isRunning = false;
     });
-    socket.on('stop', () => isRunning = false);
+    socket.on('stop', () => socket.isRunning = false);
 });
 httpServer.listen(5000, '0.0.0.0', () => console.log('Server running on port 5000'));
