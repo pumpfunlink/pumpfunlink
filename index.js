@@ -85,7 +85,6 @@ async function getSignaturesFromAlchemy(address, alchemyUrl, year) {
             // If we hit older, we already returned.
             const lastSig = batch[batch.length - 1].signature;
             batch = await fetchBatch(lastSig);
-            if (!isRunning) break;
         }
     } catch (err) {}
     return signatures;
@@ -103,7 +102,7 @@ function calculateJupAllocation(volume) {
     return 0;
 }
 
-async function analyzeSignaturesHelius(signatures, address, apiKey, onProgress) {
+async function analyzeSignaturesHelius(signatures, address, apiKey, onProgress, socket) {
     let totalJupSwaps = 0;
     let totalVolumeUSD = 0;
     const jupProgramIds = ["JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4", "JUP4Fb2cqiRUcaTHdrPC8h2gNsA2ETXiPDD33WcGuJB", "DCA265Vj8a9CEuX1eb1LWRnDT7uK6q1xMipnNyatn23M", "j1o2qRpjcyUwEvwtcfhEQefh773ZgjxcVRry7LDqg5X"];
@@ -114,7 +113,7 @@ async function analyzeSignaturesHelius(signatures, address, apiKey, onProgress) 
     for (let i = 0; i < signatures.length; i += 100) batches.push(signatures.slice(i, i + 100));
 
     const processBatch = async (batch, startIdx) => {
-        if (!isRunning) return;
+        if (!socket.isRunning) return;
         const url = apiKey.startsWith('http') ? apiKey : `https://api.helius.xyz/v0/transactions/?api-key=${apiKey}`;
         try {
             const resp = await fetch(url, { 
@@ -125,18 +124,18 @@ async function analyzeSignaturesHelius(signatures, address, apiKey, onProgress) 
                 keepalive: false
             });
             if (!resp.ok) {
-                if (resp.status === 429 && isRunning) { 
+                if (resp.status === 429 && socket.isRunning) { 
                     await sleep(5000); // Back off more aggressively on free tiers
                     return processBatch(batch, startIdx); 
                 }
                 return;
             }
             const txs = await resp.json();
-            if (!isRunning) return;
+            if (!socket.isRunning) return;
             // Process transactions in smaller chunks to avoid blocking the event loop
             for (let i = 0; i < txs.length; i++) {
                 if (i % 20 === 0) await new Promise(resolve => setImmediate(resolve));
-                if (!isRunning) break;
+                if (!socket.isRunning) break;
                 const tx = txs[i];
                 const txString = JSON.stringify(tx);
                 const isJup = tx.source === "JUPITER" || jupProgramIds.some(id => txString.includes(id)) || (tx.instructions && tx.instructions.some(ix => jupProgramIds.includes(ix.programId)));
@@ -173,12 +172,12 @@ async function analyzeSignaturesHelius(signatures, address, apiKey, onProgress) 
                     }
                 }
             }
-            if (onProgress && isRunning) onProgress(totalJupSwaps, Math.min(startIdx + 100, signatures.length), totalVolumeUSD);
+            if (onProgress && socket.isRunning) onProgress(totalJupSwaps, Math.min(startIdx + 100, signatures.length), totalVolumeUSD);
         } catch (err) {}
     };
 
     for (let i = 0; i < batches.length; i += concurrency) {
-        if (!isRunning) break;
+        if (!socket.isRunning) break;
         await Promise.all(batches.slice(i, i + concurrency).map((b, idx) => processBatch(b, i * 100 + idx * 100)));
     }
     return { count: totalJupSwaps, volume: totalVolumeUSD, totalAnalyzed: signatures.length };
@@ -321,11 +320,11 @@ app.get('/', (req, res) => {
             document.getElementById('startBtn').disabled = false; document.getElementById('startBtn').classList.remove('opacity-50');
         }
         socket.on('update', (data) => {
-            const { total, current, active, results, providers } = data;
+            const { total, current, percent, active, results, providers } = data;
             
-            const percent = total > 0 ? (current / total) * 100 : 0;
-            document.getElementById('progressBar').style.width = percent + '%';
-            document.getElementById('progressText').innerText = 'Progress: ' + Math.round(percent) + '% (' + current + '/' + total + ')';
+            const displayPercent = percent || (total > 0 ? (current / total) * 100 : 0);
+            document.getElementById('progressBar').style.width = displayPercent + '%';
+            document.getElementById('progressText').innerText = 'Progress: ' + Math.round(displayPercent) + '% (' + current + '/' + total + ')';
             document.getElementById('activeCount').innerText = 'Active: ' + active.length;
             document.getElementById('totalResults').innerText = 'Total: ' + results.length;
             document.getElementById('activeWorkers').innerHTML = active.map(w => {
@@ -399,23 +398,33 @@ io.on('connection', (socket) => {
         const socketResults = [];
         const socketActiveProgress = new Map();
         let socketNextAddressIndex = 0;
+        let totalSignaturesCount = 0;
+        let processedSignaturesCount = 0;
 
-        const broadcast = () => socket.emit('update', { 
-            total: socketAddresses.length, 
-            current: socketResults.length, 
-            active: Array.from(socketActiveProgress.entries()).map(([addr, val]) => ({ address: addr, ...val })), 
-            results: socketResults,
-            providers: {
-                helius: HELIUS_KEYS.length,
-                alchemy: ALCHEMY_KEYS.length
-            }
-        });
+        const broadcast = () => {
+            const progressPercent = totalSignaturesCount > 0 
+                ? (processedSignaturesCount / totalSignaturesCount) * 100 
+                : (socketResults.length / socketAddresses.length) * 100;
+
+            socket.emit('update', { 
+                total: socketAddresses.length, 
+                current: socketResults.length, 
+                percent: progressPercent,
+                active: Array.from(socketActiveProgress.entries()).map(([addr, val]) => ({ address: addr, ...val })), 
+                results: socketResults,
+                providers: {
+                    helius: HELIUS_KEYS.length,
+                    alchemy: ALCHEMY_KEYS.length
+                }
+            });
+        };
         const timer = setInterval(broadcast, 500);
 
         // Smart Rotation: Only use healthy providers
         const { healthyHelius, healthyAlchemy } = await getHealthyProviders();
         
         if (healthyHelius.length === 0 || healthyAlchemy.length === 0) {
+            console.log(`[خطأ] لا توجد مزودات خدمة (RPC) صالحة للعمل. يرجى التأكد من مفاتيح API.`);
             socket.emit('busy', { message: 'No healthy RPC providers available. Please check your API keys.' });
             socket.isRunning = false;
             clearInterval(timer);
@@ -434,19 +443,34 @@ io.on('connection', (socket) => {
                         const alchemyUrl = healthyAlchemy[(alchemyIdx + retryAlchemy) % healthyAlchemy.length];
                         sigs = await getSignaturesFromAlchemy(addr, alchemyUrl, year);
                         if (sigs.length > 0 || !socket.isRunning) break;
+                        console.log(`[خطأ] فشل جلب التوقيعات من الرابط: ${alchemyUrl} للمحفظة: ${addr}`);
                         retryAlchemy++;
                     }
 
                     if (!socket.isRunning) break;
-                    if (sigs.length === 0) socketResults.push({ address: addr, usage: 0, volume: 0, totalAnalyzed: 0 });
-                    else {
+                    if (sigs.length === 0) {
+                        console.log(`[تنبيه] لم يتم العثور على أي معاملات للمحفظة: ${addr} في عام ${year}`);
+                        socketResults.push({ address: addr, usage: 0, volume: 0, totalAnalyzed: 0 });
+                    } else {
+                        totalSignaturesCount += sigs.length;
                         socketActiveProgress.set(addr, { stage: "Analyzing", tx: 0, total: sigs.length, vol: 0 });
+                        let maxTx = 0;
+                        let lastCount = 0;
                         const d = await analyzeSignaturesHelius(sigs, addr, heliusKey, (c, curr, v) => {
-                            if (socket.isRunning) socketActiveProgress.set(addr, { stage: "Analyzing", tx: curr, total: sigs.length, vol: v });
-                        });
+                            if (socket.isRunning) {
+                                const delta = curr - lastCount;
+                                if (delta > 0) {
+                                    processedSignaturesCount += delta;
+                                    lastCount = curr;
+                                }
+                                maxTx = Math.max(maxTx, curr);
+                                socketActiveProgress.set(addr, { stage: "Analyzing", tx: maxTx, total: sigs.length, vol: v });
+                            }
+                        }, socket);
                         if (socket.isRunning) socketResults.push({ address: addr, usage: d.count, volume: d.volume, totalAnalyzed: d.totalAnalyzed });
                     }
                 } catch (e) { 
+                    console.log(`[خطأ فادح] فشل تحليل المحفظة ${addr}: ${e.message}`);
                     if (socket.isRunning) socketResults.push({ address: addr, usage: 0, volume: 0, totalAnalyzed: 0, error: true }); 
                 }
                 socketActiveProgress.delete(addr);
